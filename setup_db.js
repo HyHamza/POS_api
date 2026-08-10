@@ -125,6 +125,58 @@ async function run() {
   `);
 
   await conn.query(`
+    CREATE TABLE IF NOT EXISTS _pos_roles_base (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id    INT          NOT NULL,
+      name             VARCHAR(100) NOT NULL,
+      description      VARCHAR(255) DEFAULT NULL,
+      is_system        TINYINT      DEFAULT 0,
+      is_deleted       TINYINT      DEFAULT 0,
+      deleted_at       DATETIME     DEFAULT NULL,
+      hlc              VARCHAR(64)  DEFAULT NULL,
+      origin_device_id VARCHAR(64)  DEFAULT NULL,
+      sync_device_id   VARCHAR(64)  DEFAULT NULL,
+      UNIQUE KEY uq_roles (restaurant_id, name),
+      FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS _pos_permissions_base (
+      id               VARCHAR(100) NOT NULL,
+      restaurant_id    INT          NOT NULL,
+      label            VARCHAR(100) NOT NULL,
+      \`desc\`           VARCHAR(255) DEFAULT NULL,
+      category         VARCHAR(100) NOT NULL,
+      parent_id        VARCHAR(100) DEFAULT NULL,
+      is_deleted       TINYINT      DEFAULT 0,
+      deleted_at       DATETIME     DEFAULT NULL,
+      hlc              VARCHAR(64)  DEFAULT NULL,
+      origin_device_id VARCHAR(64)  DEFAULT NULL,
+      sync_device_id   VARCHAR(64)  DEFAULT NULL,
+      PRIMARY KEY (restaurant_id, id),
+      FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS _pos_role_permissions_base (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id    INT          NOT NULL,
+      role_id          INT          NOT NULL,
+      permission_id    VARCHAR(100) NOT NULL,
+      is_deleted       TINYINT      DEFAULT 0,
+      deleted_at       DATETIME     DEFAULT NULL,
+      hlc              VARCHAR(64)  DEFAULT NULL,
+      origin_device_id VARCHAR(64)  DEFAULT NULL,
+      sync_device_id   VARCHAR(64)  DEFAULT NULL,
+      UNIQUE KEY uq_role_perm (restaurant_id, role_id, permission_id),
+      FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE,
+      FOREIGN KEY (role_id)       REFERENCES _pos_roles_base(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
     CREATE TABLE IF NOT EXISTS _pos_staff_base (
       id            INT AUTO_INCREMENT PRIMARY KEY,
       restaurant_id INT          NOT NULL,
@@ -505,7 +557,7 @@ async function run() {
   // Field-level HLC columns
   const fieldHlc = {
     _pos_menu_items_base:     ['price','description','is_available','category_id','cost_price','image_path','dietary_tags','variants'],
-    _pos_orders_base:         ['status','subtotal','total','notes','rider_name'],
+    _pos_orders_base:         ['status','subtotal','total','notes','rider_name','edit_count','is_return'],
     _pos_inventory_items_base:['quantity','min_threshold','cost_per_unit'],
   };
   for (const [t, fields] of Object.entries(fieldHlc)) {
@@ -518,7 +570,10 @@ async function run() {
   // Extra one-off columns
   await addCol('_tasks_base',      'order_number',       'VARCHAR(255) DEFAULT NULL');
   await addCol('_pos_orders_base', 'rider_name',         'VARCHAR(255) DEFAULT NULL');
+  await addCol('_pos_orders_base', 'edit_count',         'INT DEFAULT 0');
+  await addCol('_pos_orders_base', 'is_return',          'TINYINT DEFAULT 0');
   await addCol('_pos_staff_base',  'permissions',        'TEXT DEFAULT NULL');
+  await addCol('_pos_staff_base',  'role_id',            'INT DEFAULT NULL');
   await addCol('_riders_base',     'refresh_token_hash', 'VARCHAR(64) DEFAULT NULL');
   await addCol('restaurants',      'plan_type',          "VARCHAR(50) DEFAULT 'lifetime'");
   await addCol('restaurants',      'expires_at',         'DATETIME DEFAULT NULL');
@@ -532,6 +587,9 @@ async function run() {
   console.log('\n[4/6] Adding HLC indexes...');
   const hlcIndexes = [
     ['_pos_settings_base',        'idx_settings_hlc',    '`hlc`'],
+    ['_pos_roles_base',           'idx_roles_hlc',       '`hlc`'],
+    ['_pos_permissions_base',     'idx_permissions_hlc', '`hlc`'],
+    ['_pos_role_permissions_base', 'idx_role_perms_hlc',  '`hlc`'],
     ['_pos_staff_base',           'idx_staff_hlc',       '`hlc`'],
     ['_pos_attendance_base',      'idx_attendance_hlc',  '`hlc`'],
     ['_pos_menu_categories_base', 'idx_menu_cats_hlc',   '`hlc`'],
@@ -566,6 +624,9 @@ async function run() {
   const views = [
     ['admins',                '_admins_base'],
     ['pos_settings',          '_pos_settings_base'],
+    ['pos_roles',             '_pos_roles_base'],
+    ['pos_permissions',       '_pos_permissions_base'],
+    ['pos_role_permissions',  '_pos_role_permissions_base'],
     ['pos_staff',             '_pos_staff_base'],
     ['pos_attendance',        '_pos_attendance_base'],
     ['pos_menu_categories',   '_pos_menu_categories_base'],
@@ -601,6 +662,9 @@ async function run() {
   const triggers = [
     ['t_admins_insert',              '_admins_base'],
     ['t_pos_settings_insert',        '_pos_settings_base'],
+    ['t_pos_roles_insert',           '_pos_roles_base'],
+    ['t_pos_permissions_insert',       '_pos_permissions_base'],
+    ['t_pos_role_permissions_insert',  '_pos_role_permissions_base'],
     ['t_pos_staff_insert',           '_pos_staff_base'],
     ['t_pos_attendance_insert',      '_pos_attendance_base'],
     ['t_pos_menu_categories_insert', '_pos_menu_categories_base'],

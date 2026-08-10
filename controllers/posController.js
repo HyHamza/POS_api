@@ -74,6 +74,9 @@ const fullExportData = async (req, res) => {
     const ALL_TABLES = [
       'pos_settings',
       'admins',               // login credentials for offline auth
+      'pos_roles',
+      'pos_permissions',
+      'pos_role_permissions',
       'pos_staff',
       'pos_customers',
       'pos_menu_categories',
@@ -152,6 +155,9 @@ function getBaseTable(table) {
   const map = {
     admins:                   '_admins_base',
     pos_settings:             '_pos_settings_base',
+    pos_roles:                '_pos_roles_base',
+    pos_permissions:          '_pos_permissions_base',
+    pos_role_permissions:     '_pos_role_permissions_base',
     pos_staff:                '_pos_staff_base',
     pos_customers:            '_pos_customers_base',
     pos_attendance:           '_pos_attendance_base',
@@ -205,6 +211,12 @@ async function fetchTableRows(table, cursor, limit, restaurantId) {
     query = `SELECT t.*, s.username AS staff_username 
              FROM \`${base}\` t 
              LEFT JOIN _pos_staff_base s ON t.staff_id = s.id AND s.restaurant_id = t.restaurant_id
+             WHERE t.restaurant_id = ?`;
+    params.push(restaurantId);
+  } else if (table === 'pos_role_permissions') {
+    query = `SELECT t.*, r.name AS role_name 
+             FROM \`${base}\` t 
+             LEFT JOIN _pos_roles_base r ON t.role_id = r.id AND r.restaurant_id = t.restaurant_id
              WHERE t.restaurant_id = ?`;
     params.push(restaurantId);
   } else if (table === 'pos_orders') {
@@ -616,7 +628,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
 
 const IGNORED_COLS = ['category_name', 'floor_name', 'order_number', 'menu_item_name',
                       'staff_username', 'table_number', 'table_section_id', 'item_name',
-                      'change_id', 'sync_device_id', 'txn_id', 'payment_staff_username'];
+                      'change_id', 'sync_device_id', 'txn_id', 'payment_staff_username', 'role_name'];
 
 async function resolveNaturalKeys(conn, clientTable, row) {
   // FIX (Bug #1): Use @current_restaurant_id session variable set by the pool proxy
@@ -627,6 +639,22 @@ async function resolveNaturalKeys(conn, clientTable, row) {
       [row.floor_name]
     );
     if (f) row.floor_id = f.id;
+  } else if (clientTable === 'role_permissions') {
+    if (row.role_name) {
+      const [[r]] = await conn.query(
+        `SELECT id FROM _pos_roles_base WHERE restaurant_id = @current_restaurant_id AND name = ?`,
+        [row.role_name]
+      );
+      if (r) row.role_id = r.id;
+    }
+  } else if (clientTable === 'staff') {
+    if (row.role) {
+      const [[r]] = await conn.query(
+        `SELECT id FROM _pos_roles_base WHERE restaurant_id = @current_restaurant_id AND name = ?`,
+        [row.role]
+      );
+      if (r) row.role_id = r.id;
+    }
   } else if (clientTable === 'menu_items' && row.category_name) {
     const [[c]] = await conn.query(
       `SELECT id FROM _pos_menu_categories_base WHERE restaurant_id = @current_restaurant_id AND name = ?`, 
