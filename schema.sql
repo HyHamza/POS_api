@@ -469,5 +469,5 @@ CREATE TRIGGER t_pos_expenses_insert BEFORE INSERT ON _pos_expenses_base FOR EAC
 
 -- ─── Seed Data ───────────────────────────────────────────────────────────────
 INSERT INTO super_admins (username, password_hash)
-VALUES ('admin', '$2a$10$MOeV6M7AEvA8IqSOW8unYeB0gzhQjUP7e52If9aGHJ4.9XqVLYtta')
+VALUES ('admin', '$2a$10$CEWQoPZYoXI8N5B/GlClK.mXjh8LQINY18EXjbmkDHj6YQx7Nf846')
 ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash);

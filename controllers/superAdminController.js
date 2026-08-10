@@ -464,6 +464,61 @@ const extendPlan = async (req, res) => {
   }
 };
 
+const createAdminForRestaurant = async (req, res) => {
+  const { id } = req.params;
+  const { adminUsername, adminPassword, adminEmail } = req.body;
+
+  if (!adminUsername || !adminPassword) {
+    return res.status(400).json({ success: false, error: 'Username and password are required.' });
+  }
+
+  const connection = await mainPool.getConnection();
+  try {
+    await connection.beginTransaction();
+
+    // Verify restaurant exists
+    const [restaurants] = await connection.query('SELECT id FROM restaurants WHERE id = ?', [id]);
+    if (restaurants.length === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, error: 'Restaurant not found.' });
+    }
+
+    // Check if username is taken for this restaurant
+    const [existing] = await connection.query('SELECT id FROM _admins_base WHERE restaurant_id = ? AND username = ?', [id, adminUsername]);
+    if (existing.length > 0) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, error: 'Admin username already exists for this restaurant.' });
+    }
+
+    // Create the admin user in the base admins table
+    const adminPasswordHash = await bcrypt.hash(adminPassword, 12);
+    await connection.query(
+      'INSERT INTO _admins_base (restaurant_id, username, password_hash, email) VALUES (?, ?, ?, ?)',
+      [id, adminUsername, adminPasswordHash, adminEmail || null]
+    );
+
+    // Hash pin for POS admin staff user
+    const crypto = require('crypto');
+    const pin = /^\\d+$/.test(adminPassword) ? adminPassword : '0000';
+    const pinHash = crypto.createHash('sha256').update(String(pin)).digest('hex');
+
+    // Create initial admin staff user in _pos_staff_base
+    await connection.query(
+      'INSERT INTO _pos_staff_base (restaurant_id, name, username, pin_hash, role, status) VALUES (?, ?, ?, ?, ?, ?)',
+      [id, 'Admin User', adminUsername, pinHash, 'Admin', 'Active']
+    );
+
+    await connection.commit();
+    return res.status(201).json({ success: true, message: 'Admin account created successfully.' });
+  } catch (err) {
+    await connection.rollback();
+    console.error('Failed to create admin:', err);
+    return res.status(500).json({ success: false, error: `Failed to create admin: ${err.message}` });
+  } finally {
+    connection.release();
+  }
+};
+
 const deleteRestaurant = async (req, res) => {
   const { id } = req.params;
 
@@ -1288,6 +1343,7 @@ module.exports = {
   login,
   getRestaurants,
   createRestaurant,
+  createAdminForRestaurant,
   toggleStatus,
   updatePlan,
   extendPlan,
