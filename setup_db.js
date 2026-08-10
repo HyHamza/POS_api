@@ -89,6 +89,12 @@ async function run() {
     CREATE TABLE IF NOT EXISTS sync_events (
       sync_device_id VARCHAR(64) NOT NULL,
       restaurant_id  INT         NOT NULL,
+      change_id      VARCHAR(64) DEFAULT NULL,
+      device_id      VARCHAR(64) DEFAULT NULL,
+      table_name     VARCHAR(64) DEFAULT NULL,
+      row_id         INT         DEFAULT NULL,
+      hlc            VARCHAR(128) DEFAULT NULL,
+      txn_id         VARCHAR(64) DEFAULT NULL,
       processed_at   DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
       PRIMARY KEY (sync_device_id, restaurant_id),
       INDEX idx_sync_events_rid  (restaurant_id),
@@ -568,6 +574,12 @@ async function run() {
   }
 
   // Extra one-off columns
+  await addCol('sync_events',      'change_id',          'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',      'device_id',          'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',      'table_name',         'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',      'row_id',             'INT DEFAULT NULL');
+  await addCol('sync_events',      'hlc',                'VARCHAR(128) DEFAULT NULL');
+  await addCol('sync_events',      'txn_id',             'VARCHAR(64) DEFAULT NULL');
   await addCol('_tasks_base',      'order_number',       'VARCHAR(255) DEFAULT NULL');
   await addCol('_pos_orders_base', 'rider_name',         'VARCHAR(255) DEFAULT NULL');
   await addCol('_pos_orders_base', 'edit_count',         'INT DEFAULT 0');
@@ -579,7 +591,6 @@ async function run() {
   await addCol('restaurants',      'expires_at',         'DATETIME DEFAULT NULL');
   await addCol('restaurants',      'active_server_id',   "VARCHAR(50) DEFAULT NULL");
   await addCol('restaurants',      'active_server_epoch',"INT DEFAULT 0");
-
 
   console.log('  Columns OK');
 
@@ -613,6 +624,14 @@ async function run() {
   for (const [t, idx, cols] of hlcIndexes) {
     if (await tableExists(t)) await addIdx(t, idx, cols);
   }
+
+  // Indexes for sync_events
+  await addIdx('sync_events', 'idx_sync_events_change_id', '`change_id`');
+  await addIdx('sync_events', 'idx_sync_events_device_table_row', '`device_id`, `table_name`, `row_id`');
+  await addIdx('sync_events', 'idx_sync_events_rid_change', '`restaurant_id`, `change_id`');
+  await addIdx('sync_events', 'idx_sync_events_txn_id', '`txn_id`');
+  await addIdx('sync_events', 'idx_sync_events_restaurant_txn', '`restaurant_id`, `txn_id`');
+
   console.log('  Indexes OK');
 
   // ── Step 5: Views, function, and triggers ────────────────────────────────────

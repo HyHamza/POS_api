@@ -476,6 +476,70 @@ async function testDbConnection() {
       )
     `);
 
+    // Ensure sync_events table exists and has change_id, device_id, table_name, row_id, hlc, txn_id columns
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS sync_events (
+        sync_device_id VARCHAR(64) NOT NULL,
+        restaurant_id  INT         NOT NULL,
+        processed_at   DATETIME(3) DEFAULT CURRENT_TIMESTAMP(3),
+        PRIMARY KEY (sync_device_id, restaurant_id),
+        INDEX idx_sync_events_rid  (restaurant_id),
+        INDEX idx_sync_events_time (processed_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
+
+    const syncEventCols = [
+      { name: 'change_id',  def: 'VARCHAR(64) DEFAULT NULL' },
+      { name: 'device_id',  def: 'VARCHAR(64) DEFAULT NULL' },
+      { name: 'table_name', def: 'VARCHAR(64) DEFAULT NULL' },
+      { name: 'row_id',     def: 'INT DEFAULT NULL' },
+      { name: 'hlc',        def: 'VARCHAR(128) DEFAULT NULL' },
+      { name: 'txn_id',     def: 'VARCHAR(64) DEFAULT NULL' }
+    ];
+
+    for (const col of syncEventCols) {
+      const [colExists] = await pool.query(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sync_events' AND COLUMN_NAME = ?
+      `, [col.name]);
+      if (colExists.length === 0) {
+        console.log(`[Startup] Adding ${col.name} column to sync_events table...`);
+        try {
+          await pool.query(`ALTER TABLE sync_events ADD COLUMN \`${col.name}\` ${col.def}`);
+        } catch (e) {
+          if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+        }
+      }
+    }
+
+    // Ensure indexes exist on sync_events
+    const syncEventIndexes = [
+      { name: 'idx_sync_events_change_id', cols: '`change_id`', isUnique: true },
+      { name: 'idx_sync_events_device_table_row', cols: '`device_id`, `table_name`, `row_id`', isUnique: false },
+      { name: 'idx_sync_events_rid_change', cols: '`restaurant_id`, `change_id`', isUnique: false },
+      { name: 'idx_sync_events_txn_id', cols: '`txn_id`', isUnique: false },
+      { name: 'idx_sync_events_restaurant_txn', cols: '`restaurant_id`, `txn_id`', isUnique: false }
+    ];
+
+    for (const idx of syncEventIndexes) {
+      const [idxExists] = await pool.query(`
+        SELECT INDEX_NAME FROM INFORMATION_SCHEMA.STATISTICS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'sync_events' AND INDEX_NAME = ?
+      `, [idx.name]);
+      if (idxExists.length === 0) {
+        console.log(`[Startup] Creating index ${idx.name} on sync_events table...`);
+        try {
+          if (idx.isUnique) {
+            await pool.query(`CREATE UNIQUE INDEX \`${idx.name}\` ON sync_events (${idx.cols})`);
+          } else {
+            await pool.query(`CREATE INDEX \`${idx.name}\` ON sync_events (${idx.cols})`);
+          }
+        } catch (e) {
+          if (e.code !== 'ER_DUP_KEYNAME') throw e;
+        }
+      }
+    }
+
 
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Database connection or migration error on startup:`, err);

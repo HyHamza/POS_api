@@ -435,13 +435,15 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
         let txnChangesCount = 0;
         
         for (const { clientTable, cloudTable, row } of txnRows) {
-          const processed = await processRow(
+          const result = await processRow(
             connection, clientTable, cloudTable, row, senderClientId, 
             restaurantId, FIELD_LEVEL_TABLES, importErrors
           );
           
-          if (processed) {
+          if (result.processed) {
             txnChangesCount++;
+          }
+          if (result.processed || result.duplicate) {
             const changeId = row.change_id || row._change_id;
             if (changeId) syncedChangeIds.push(changeId);
           }
@@ -467,13 +469,15 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
       
       try {
         for (const { clientTable, cloudTable, row } of noTxnRows) {
-          const processed = await processRow(
+          const result = await processRow(
             connection, clientTable, cloudTable, row, senderClientId,
             restaurantId, FIELD_LEVEL_TABLES, importErrors
           );
           
-          if (processed) {
+          if (result.processed) {
             totalChangesCount++;
+          }
+          if (result.processed || result.duplicate) {
             const changeId = row.change_id || row._change_id;
             if (changeId) syncedChangeIds.push(changeId);
           }
@@ -540,7 +544,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
       );
       if (existing) {
         logger.debug(`Skipping duplicate change_id: ${changeId}`);
-        return false; // already processed
+        return { processed: false, duplicate: true }; // already processed
       }
     } else if (syncId) {
       const [[existing]] = await connection.query(
@@ -549,12 +553,12 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
       );
       if (existing) {
         logger.debug(`Skipping duplicate sync_device_id: ${syncId}`);
-        return false; // already processed
+        return { processed: false, duplicate: true }; // already processed
       }
     }
   } else {
     logger.error(`restaurantId is null/undefined! Cannot process row.`);
-    return false;
+    return { processed: false, duplicate: false, error: 'restaurantId is null/undefined' };
   }
 
   if (restaurantId !== null && restaurantId !== undefined) {
@@ -589,7 +593,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
       );
       existing = r || null;
     }
-  } catch (_) { return false; }
+  } catch (_) { return { processed: false, duplicate: false, error: 'Database fetch error' }; }
 
   const incomingHlc = row._hlc || row.hlc || '';
 
@@ -623,7 +627,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
     logger.error(`Cannot register sync_event - restaurantId is null/undefined!`);
   }
 
-  return true; // Successfully processed
+  return { processed: true, duplicate: false }; // Successfully processed
 }
 
 const IGNORED_COLS = ['category_name', 'floor_name', 'order_number', 'menu_item_name',
@@ -915,7 +919,12 @@ const importData = async (req, res) => {
   if (!result.success) {
     return res.status(500).json({ success: false, error: result.error });
   }
-  res.json({ success: true, processed: result.processed, errors: result.errors });
+  res.json({ 
+    success: true, 
+    processed: result.processed, 
+    errors: result.errors,
+    synced_change_ids: result.synced_change_ids || []
+  });
 };
 
 
