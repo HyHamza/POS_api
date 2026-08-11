@@ -159,8 +159,12 @@ module.exports = (io) => {
           return;
         }
 
-        // Check if rider is active
-        const [riders] = await pool.query('SELECT is_active FROM riders WHERE id = ?', [riderId]);
+        // Check if rider is active — use _riders_base directly with restaurant_id
+        // (the riders VIEW requires @current_restaurant_id session var which is not set in socket context)
+        const [riders] = await pool.query(
+          'SELECT is_active FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+          [riderId, socket.restaurantId]
+        );
         if (riders.length === 0 || !riders[0].is_active) {
           return socket.emit('auth:error', { error: 'Rider deactivated or not found.' });
         }
@@ -190,8 +194,11 @@ module.exports = (io) => {
           }
         }
 
-        // Update status to idle if offline
-        await pool.query('UPDATE riders SET status = ? WHERE id = ? AND status = ?', ['idle', riderId, 'offline']);
+        // Update status to idle if offline — use _riders_base directly
+        await pool.query(
+          'UPDATE _riders_base SET status = ? WHERE id = ? AND restaurant_id = ? AND status = ?',
+          ['idle', riderId, socket.restaurantId, 'offline']
+        );
 
         // Confirm auth
         socket.emit('connected:confirmed', { success: true, role: 'rider' });
@@ -585,8 +592,11 @@ module.exports = (io) => {
       }
 
       try {
-        // Verify rider
-        const [riderRows] = await pool.query('SELECT is_active FROM riders WHERE id = ?', [riderId]);
+        // Verify rider — use _riders_base directly with restaurant_id
+        const [riderRows] = await pool.query(
+          'SELECT is_active FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+          [riderId, socket.restaurantId]
+        );
         if (riderRows.length === 0 || !riderRows[0].is_active) {
           return socket.emit('error', { message: 'Rider is deactivated or does not exist.' });
         }
