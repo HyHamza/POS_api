@@ -356,6 +356,14 @@ const updateTaskStatus = async (req, res) => {
       let updateQuery = 'UPDATE _tasks_base SET status = ?';
       const params = [status];
 
+      if (req.body.rider_id !== undefined && role === 'admin') {
+        updateQuery += ', rider_id = ?';
+        params.push(req.body.rider_id || null);
+        if (req.body.rider_id) {
+          updateQuery += ', assigned_at = NOW()';
+        }
+      }
+
       if (status === 'accepted') {
         updateQuery += ', accepted_at = NOW()';
       } else if (status === 'delivered') {
@@ -385,7 +393,7 @@ const updateTaskStatus = async (req, res) => {
 
     // If status updates affect rider state
     let newRiderStatus = null;
-    const activeRiderId = task.rider_id || userId;
+    const activeRiderId = req.body.rider_id || task.rider_id || userId;
     if (activeRiderId) {
       if (status === 'accepted') {
         newRiderStatus = 'idle'; // stays idle but preparing
@@ -422,6 +430,20 @@ const updateTaskStatus = async (req, res) => {
       // Broadcast to admin room about task status change
       io.to(`admin:${licenseKey}`).emit('task:status:update', updatedTask);
       console.log(`[Rider API] Broadcasted socket event 'task:status:update' to admin:${licenseKey} for Task ID: ${id}, Status: ${status}`);
+
+      // Broadcast task update to all riders in this restaurant
+      io.to(`riders:${licenseKey}`).emit('task:updated', updatedTask);
+
+      // If assigned to a rider specifically
+      if (updatedTask && updatedTask.rider_id) {
+        io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:new', updatedTask);
+        io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+        io.to(`riders:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id });
+
+        if (role === 'admin' && req.body.rider_id) {
+          sendTaskNotification(updatedTask.rider_id, updatedTask).catch(err => console.error('Notification error:', err));
+        }
+      }
 
       if (task.rider_id) {
         // If task was cancelled by admin, notify the rider

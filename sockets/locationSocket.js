@@ -611,8 +611,13 @@ module.exports = (io) => {
           await syncOrderStatusWithTask(pool, task.restaurant_id, task.order_number, task.status, socket.licenseKey, io);
         }
 
-        // Notify rider via Socket.IO
+        // Notify assigned rider via Socket.IO
         io.to(`rider:${socket.licenseKey}:${riderId}`).emit('task:new', task);
+        io.to(`rider:${socket.licenseKey}:${riderId}`).emit('task:updated', task);
+
+        // Notify all riders that task is assigned/claimed
+        io.to(`riders:${socket.licenseKey}`).emit('task:claimed', { taskId: parseInt(taskId), riderId: parseInt(riderId) });
+        io.to(`riders:${socket.licenseKey}`).emit('task:updated', task);
 
         // Broadcast task status update to all tenant admins
         io.to(`admin:${socket.licenseKey}`).emit('task:status:update', task);

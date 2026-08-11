@@ -369,6 +369,69 @@ async function testDbConnection() {
           console.warn('[Startup Warning] Failed to recreate pos_staff view:', e.message);
         }
       }
+
+      // Check and add attendance_pin_hash column to _pos_staff_base table if it doesn't exist
+      const [attendancePinCols] = await pool.query(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_staff_base' AND COLUMN_NAME = 'attendance_pin_hash'
+      `);
+      if (attendancePinCols.length === 0) {
+        console.log('[Startup] Adding attendance_pin_hash column to _pos_staff_base table...');
+        try {
+          await pool.query(`ALTER TABLE _pos_staff_base ADD COLUMN attendance_pin_hash VARCHAR(255) DEFAULT NULL`);
+        } catch (e) {
+          if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+        }
+        try {
+          await pool.query(`CREATE OR REPLACE VIEW pos_staff AS SELECT * FROM _pos_staff_base WHERE restaurant_id = current_restaurant_id()`);
+        } catch (e) {
+          console.warn('[Startup Warning] Failed to recreate pos_staff view:', e.message);
+        }
+      }
+
+      // Check and add fingerprint_template column to _pos_staff_base table if it doesn't exist
+      const [fingerprintCols] = await pool.query(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_staff_base' AND COLUMN_NAME = 'fingerprint_template'
+      `);
+      if (fingerprintCols.length === 0) {
+        console.log('[Startup] Adding fingerprint_template column to _pos_staff_base table...');
+        try {
+          await pool.query(`ALTER TABLE _pos_staff_base ADD COLUMN fingerprint_template TEXT DEFAULT NULL`);
+        } catch (e) {
+          if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+        }
+        try {
+          await pool.query(`CREATE OR REPLACE VIEW pos_staff AS SELECT * FROM _pos_staff_base WHERE restaurant_id = current_restaurant_id()`);
+        } catch (e) {
+          console.warn('[Startup Warning] Failed to recreate pos_staff view:', e.message);
+        }
+      }
+    }
+
+    // Check and add verification_method column to _pos_attendance_base table if it doesn't exist
+    const [attendanceTableExists] = await pool.query(`
+      SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_attendance_base'
+    `);
+    if (attendanceTableExists.length > 0) {
+      const [verificationMethodCols] = await pool.query(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS 
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_attendance_base' AND COLUMN_NAME = 'verification_method'
+      `);
+      if (verificationMethodCols.length === 0) {
+        console.log('[Startup] Adding verification_method column to _pos_attendance_base table...');
+        try {
+          await pool.query(`ALTER TABLE _pos_attendance_base ADD COLUMN verification_method VARCHAR(50) DEFAULT 'Face'`);
+        } catch (e) {
+          if (e.code !== 'ER_DUP_FIELDNAME') throw e;
+        }
+        try {
+          await pool.query(`CREATE OR REPLACE VIEW pos_attendance AS SELECT * FROM _pos_attendance_base WHERE restaurant_id = current_restaurant_id()`);
+        } catch (e) {
+          console.warn('[Startup Warning] Failed to recreate pos_attendance view:', e.message);
+        }
+      }
     }
 
     // Check and add overtime columns to _pos_payroll_base table if they don't exist

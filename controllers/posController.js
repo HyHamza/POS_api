@@ -384,7 +384,7 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
 
     const FIELD_LEVEL_TABLES = {
       _pos_menu_items_base:      ['price', 'description', 'is_available', 'category_id', 'cost_price', 'image_path', 'dietary_tags', 'variants'],
-      _pos_orders_base:          ['status', 'subtotal', 'total', 'notes', 'rider_name', 'payment_received', 'payment_received_at', 'payment_received_by'],
+      _pos_orders_base:          ['status', 'subtotal', 'total', 'notes', 'rider_name', 'payment_received', 'payment_received_at', 'payment_received_by', 'edit_count', 'is_return'],
       _pos_inventory_items_base: ['quantity', 'min_threshold', 'cost_per_unit'],
     };
 
@@ -569,7 +569,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
   await resolveNaturalKeys(connection, clientTable, row);
 
   // ── Determine match column for upsert logic ───────────────────────
-  const APPEND_ONLY = ['inventory_log', 'attendance', 'order_items', 'activity_logs'];
+  const APPEND_ONLY = ['inventory_log', 'attendance', 'activity_logs'];
 
   let matchCol = 'id';
   let matchVal = row.id;
@@ -585,6 +585,8 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
   try {
     if (clientTable === 'attendance') {
       existing = await findAttendanceMatch(connection, cloudTable, row);
+    } else if (clientTable === 'order_items') {
+      existing = await findOrderItemMatch(connection, cloudTable, row);
     } else if (matchVal !== undefined && matchVal !== null) {
       // CRITICAL FIX (Bug #1): Add restaurant_id filter to ALL match queries
       const [[r]] = await connection.query(
@@ -745,6 +747,30 @@ async function findAttendanceMatch(conn, cloudTable, row) {
       const ct = new Date(r.clock_in).getTime();
       if (!isNaN(t) && !isNaN(ct) && Math.abs(t - ct) < 120000) return r;
     }
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`, 
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findOrderItemMatch(conn, cloudTable, row) {
+  if (row.order_id && row.name) {
+    let query = `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND order_id = ? AND name = ?`;
+    const params = [row.order_id, row.name];
+    if (row.menu_item_id) {
+      query += ` AND menu_item_id = ?`;
+      params.push(row.menu_item_id);
+    } else {
+      query += ` AND menu_item_id IS NULL`;
+    }
+    query += ` LIMIT 1`;
+    const [[r]] = await conn.query(query, params);
+    if (r) return r;
   }
   if (row.id) {
     const [[r]] = await conn.query(

@@ -184,21 +184,23 @@ async function run() {
 
   await conn.query(`
     CREATE TABLE IF NOT EXISTS _pos_staff_base (
-      id            INT AUTO_INCREMENT PRIMARY KEY,
-      restaurant_id INT          NOT NULL,
-      name          VARCHAR(255) NOT NULL,
-      username      VARCHAR(255) NOT NULL,
-      pin_hash      VARCHAR(255) NOT NULL,
-      role          VARCHAR(50)  NOT NULL DEFAULT 'Waiter',
-      phone         VARCHAR(50),
-      email         VARCHAR(255),
-      hire_date     DATE,
-      salary_type   VARCHAR(50)  DEFAULT 'Monthly',
-      salary_amount DOUBLE       DEFAULT 0,
-      status        VARCHAR(50)  DEFAULT 'Active',
-      permissions   TEXT         DEFAULT NULL,
-      daily_duty_hours INT       DEFAULT 8,
-      created_at    TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id       INT          NOT NULL,
+      name                VARCHAR(255) NOT NULL,
+      username            VARCHAR(255) NOT NULL,
+      pin_hash            VARCHAR(255) NOT NULL,
+      role                VARCHAR(50)  NOT NULL DEFAULT 'Waiter',
+      phone               VARCHAR(50),
+      email               VARCHAR(255),
+      hire_date           DATE,
+      salary_type         VARCHAR(50)  DEFAULT 'Monthly',
+      salary_amount       DOUBLE       DEFAULT 0,
+      status              VARCHAR(50)  DEFAULT 'Active',
+      permissions         TEXT         DEFAULT NULL,
+      daily_duty_hours    INT          DEFAULT 8,
+      attendance_pin_hash VARCHAR(255) DEFAULT NULL,
+      fingerprint_template TEXT         DEFAULT NULL,
+      created_at          TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
       UNIQUE KEY uq_staff (restaurant_id, username),
       FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -206,12 +208,13 @@ async function run() {
 
   await conn.query(`
     CREATE TABLE IF NOT EXISTS _pos_attendance_base (
-      id            INT AUTO_INCREMENT PRIMARY KEY,
-      restaurant_id INT      NOT NULL,
-      staff_id      INT      NOT NULL,
-      clock_in      DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-      clock_out     DATETIME,
-      date          DATE     NOT NULL,
+      id                  INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id       INT      NOT NULL,
+      staff_id            INT      NOT NULL,
+      clock_in            DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      clock_out           DATETIME,
+      date                DATE     NOT NULL,
+      verification_method VARCHAR(50)  DEFAULT 'Face',
       FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE,
       FOREIGN KEY (staff_id)      REFERENCES _pos_staff_base(id) ON DELETE CASCADE
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
@@ -586,6 +589,9 @@ async function run() {
   await addCol('_pos_orders_base', 'is_return',          'TINYINT DEFAULT 0');
   await addCol('_pos_staff_base',  'permissions',        'TEXT DEFAULT NULL');
   await addCol('_pos_staff_base',  'role_id',            'INT DEFAULT NULL');
+  await addCol('_pos_staff_base',  'attendance_pin_hash', 'VARCHAR(255) DEFAULT NULL');
+  await addCol('_pos_staff_base',  'fingerprint_template', 'TEXT DEFAULT NULL');
+  await addCol('_pos_attendance_base', 'verification_method', "VARCHAR(50) DEFAULT 'Face'");
   await addCol('_riders_base',     'refresh_token_hash', 'VARCHAR(64) DEFAULT NULL');
   await addCol('restaurants',      'plan_type',          "VARCHAR(50) DEFAULT 'lifetime'");
   await addCol('restaurants',      'expires_at',         'DATETIME DEFAULT NULL');
