@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const superAdminController = require('../controllers/superAdminController');
+const appReleaseController = require('../controllers/appReleaseController');
 const { authenticateJWT } = require('../middleware/auth');
 
 // Super Admin Authentication Middleware
@@ -30,6 +31,13 @@ router.put('/restaurants/:id/extend', superAdminController.extendPlan);
 router.delete('/restaurants/:id', superAdminController.deleteRestaurant);
 router.get('/health', superAdminController.getHealth);
 
+// App releases management
+router.get   ('/app-releases',              appReleaseController.listReleases);
+router.post  ('/app-releases',              appReleaseController.createRelease);
+router.put   ('/app-releases/:id/activate', appReleaseController.activateRelease);
+router.put   ('/app-releases/:id',          appReleaseController.updateRelease);
+router.delete('/app-releases/:id',          appReleaseController.deleteRelease);
+
 // Dashboard routes
 router.get('/dashboard/restaurants', superAdminController.getRestaurantsOverview);
 router.get('/dashboard/employees', superAdminController.getAllEmployees);
@@ -42,3 +50,4 @@ router.get('/dashboard/activity-logs', superAdminController.getActivityLogs);
 router.get('/dashboard/customers', superAdminController.getAllCustomers);
 
 module.exports = router;
+

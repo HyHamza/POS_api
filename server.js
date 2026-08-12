@@ -17,6 +17,7 @@ const taskRoutes = require('./routes/taskRoutes');
 const posRoutes = require('./routes/posRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 const superAdminRoutes = require('./routes/superAdminRoutes');
+const appUpdateRoutes = require('./routes/appUpdateRoutes');
 const tenantMiddleware = require('./middleware/tenant');
 const apiLogger = require('./middleware/logger');
 
@@ -74,6 +75,9 @@ app.use((req, res, next) => {
 
 // Super Admin Static hosting and API routes (unaffected by tenantMiddleware)
 app.use('/api/super-admin', superAdminRoutes);
+
+// Public app updates endpoint (unaffected by tenantMiddleware)
+app.use('/api/app-updates', appUpdateRoutes);
 
 // Apply Tenant routing middleware globally for all standard business APIs
 app.use(tenantMiddleware);
