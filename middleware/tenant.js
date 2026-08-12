@@ -2,10 +2,14 @@ const { asyncLocalStorage, resolvePoolForLicense } = require('../config/db');
 
 const tenantMiddleware = async (req, res, next) => {
   // Bypass tenant resolution for super-admin, verify-license and app-updates endpoints
+  const path = req.path || '';
+  const url = req.originalUrl || '';
   if (
-    req.path.startsWith('/api/super-admin') || 
-    req.path === '/api/auth/verify-license' ||
-    req.path.startsWith('/api/app-updates')
+    path.startsWith('/api/super-admin') || 
+    path === '/api/auth/verify-license' ||
+    path.startsWith('/api/app-updates') ||
+    path.includes('app-updates') ||
+    url.includes('app-updates')
   ) {
     return next();
   }
