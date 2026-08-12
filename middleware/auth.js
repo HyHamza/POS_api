@@ -64,6 +64,13 @@ const checkPermission = (permission) => {
       return res.status(401).json({ success: false, error: 'Unauthorized.' });
     }
 
+    // CRITICAL FIX: Bypass permission checks for riders entirely
+    // Riders don't have permissions in the staff table, they have their own access rules
+    if (req.user.role === 'rider') {
+      console.log(`[Auth] Rider ${req.user.id} bypassing permission check: ${permission}`);
+      return next();
+    }
+
     // Bypass for super admin
     if (req.user.role === 'super_admin') {
       return next();
@@ -95,13 +102,14 @@ const checkPermission = (permission) => {
       if (staffRows.length > 0) {
         staffRow = staffRows[0];
       } else {
-        // Check if user is a rider
+        // Check if user is a rider (should not reach here due to bypass above, but keeping for safety)
         const [riderRows] = await pool.query(
           'SELECT 1 FROM _riders_base WHERE id = ? AND restaurant_id = ?',
           [id, restaurantId]
         );
         if (riderRows.length > 0) {
-          staffRow = { role: 'Rider', role_id: null, permissions: '[]' };
+          console.log(`[Auth] Rider ${id} found in database, bypassing permission check`);
+          return next();
         }
       }
 
