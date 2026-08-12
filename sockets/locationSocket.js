@@ -362,13 +362,15 @@ module.exports = (io) => {
               // Broadcast task status update to all admins
               io.to(`admin:${socket.licenseKey}`).emit('task:status:update', updatedTask);
 
-              // Broadcast update to riders
+              // Broadcast update to riders using task:updated for consistency
               if (updatedTask.rider_id) {
                 // If a rider is already assigned, send to that rider
-                io.to(`rider:${socket.licenseKey}:${updatedTask.rider_id}`).emit('task:new', updatedTask);
+                io.to(`rider:${socket.licenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+                console.log(`[KDS Status Change] Sent task:updated to rider:${socket.licenseKey}:${updatedTask.rider_id} for task ${updatedTask.id}`);
               } else {
                 // Otherwise broadcast to all riders
-                io.to(`riders:${socket.licenseKey}`).emit('task:available', updatedTask);
+                io.to(`riders:${socket.licenseKey}`).emit('task:updated', updatedTask);
+                console.log(`[KDS Status Change] Broadcasted task:updated to riders:${socket.licenseKey} for task ${updatedTask.id}`);
               }
 
               // Send push notification trigger
