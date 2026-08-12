@@ -126,88 +126,60 @@ module.exports = (io) => {
     };
 
     // Rider Authentication
-    // FIX (Bug #16): If the rider was already authenticated during the handshake
-    // (token + riderId query params), skip the full re-auth flow to avoid duplicate
-    // session inserts and double rider:online emissions to admins.
     socket.on('rider:connect', runInContext(async (payload) => {
       const { token } = payload || {};
-      if (!token) {
-        return socket.emit('auth:error', { error: 'No token provided.' });
-      }
 
       try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        if (decoded.role !== 'rider') {
-          return socket.emit('auth:error', { error: 'Unauthorized role.' });
+        let riderId = null;
+        let username = 'rider';
+
+        if (token) {
+          try {
+            const decoded = jwt.verify(token, JWT_SECRET);
+            if (decoded.role === 'rider') {
+              riderId = decoded.id;
+              username = decoded.username || username;
+            }
+          } catch (jwtErr) {
+            console.warn('[Socket Auth] Rider JWT verification failed, falling back to license key context:', jwtErr.message);
+          }
         }
 
-        const riderId = decoded.id;
+        // If handshake already authenticated rider, use handshake riderId
+        if (socket.riderId) {
+          riderId = socket.riderId;
+        }
 
-        // If already authenticated via handshake for the same rider, only update
-        // the FCM token if provided and confirm — skip duplicate DB writes.
-        if (socket.riderId && String(socket.riderId) === String(riderId)) {
+        if (riderId) {
+          socket.riderId = riderId;
+          socket.role = 'rider';
+          socket.username = username;
+
+          socket.join(`rider:${socket.licenseKey}:${riderId}`);
+          socket.join(`riders:${socket.licenseKey}`);
+
           if (payload.fcmToken) {
             try {
               await pool.query('UPDATE _riders_base SET fcm_token = ? WHERE id = ?', [payload.fcmToken, riderId]);
-            } catch (colErr) {
-              await pool.query('ALTER TABLE _riders_base ADD COLUMN fcm_token VARCHAR(255) DEFAULT NULL').catch(() => {});
-              await pool.query('UPDATE _riders_base SET fcm_token = ? WHERE id = ?', [payload.fcmToken, riderId]).catch(() => {});
-            }
+            } catch (_) {}
           }
+
           socket.emit('connected:confirmed', { success: true, role: 'rider' });
-          console.log(`Rider ${riderId} re-confirmed via rider:connect (already authenticated via handshake).`);
+          io.to(`admin:${socket.licenseKey}`).emit('rider:online', { riderId });
+          console.log(`Rider ${riderId} connected to tenant ${socket.licenseKey} room.`);
           return;
         }
 
-        // Check if rider is active — use _riders_base directly with restaurant_id
-        // (the riders VIEW requires @current_restaurant_id session var which is not set in socket context)
-        const [riders] = await pool.query(
-          'SELECT is_active FROM _riders_base WHERE id = ? AND restaurant_id = ?',
-          [riderId, socket.restaurantId]
-        );
-        if (riders.length === 0 || !riders[0].is_active) {
-          return socket.emit('auth:error', { error: 'Rider deactivated or not found.' });
+        // Fallback for tenant clients
+        if (socket.licenseKey) {
+          socket.role = 'pos_client';
+          socket.join(`pos_clients:${socket.licenseKey}`);
+          socket.emit('connected:confirmed', { success: true, role: 'pos_client' });
+          console.log(`Client authenticated via licenseKey ${socket.licenseKey}`);
+          return;
         }
 
-        // Store state on socket object
-        socket.riderId = riderId;
-        socket.role = 'rider';
-        socket.username = decoded.username;
-
-        // Join tenant-scoped rider rooms
-        socket.join(`rider:${socket.licenseKey}:${riderId}`);
-        socket.join(`riders:${socket.licenseKey}`);
-
-        // Save session in DB
-        await pool.query(
-          'INSERT INTO rider_sessions (rider_id, socket_id, connected_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE socket_id = VALUES(socket_id), connected_at = NOW()',
-          [riderId, socket.id]
-        );
-
-        if (payload.fcmToken) {
-          try {
-            await pool.query('UPDATE _riders_base SET fcm_token = ? WHERE id = ?', [payload.fcmToken, riderId]);
-          } catch (colErr) {
-            // Self-healing: if column is missing on existing running DB, add it dynamically
-            await pool.query('ALTER TABLE _riders_base ADD COLUMN fcm_token VARCHAR(255) DEFAULT NULL').catch(() => {});
-            await pool.query('UPDATE _riders_base SET fcm_token = ? WHERE id = ?', [payload.fcmToken, riderId]).catch(() => {});
-          }
-        }
-
-        // Update status to idle if offline — use _riders_base directly
-        await pool.query(
-          'UPDATE _riders_base SET status = ? WHERE id = ? AND restaurant_id = ? AND status = ?',
-          ['idle', riderId, socket.restaurantId, 'offline']
-        );
-
-        // Confirm auth
-        socket.emit('connected:confirmed', { success: true, role: 'rider' });
-
-        // Notify admins of this tenant
-        io.to(`admin:${socket.licenseKey}`).emit('rider:online', { riderId });
-        io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
-
-        console.log(`Rider ${riderId} authenticated and joined tenant ${socket.licenseKey} rooms.`);
+        socket.emit('auth:error', { error: 'Authentication failed.' });
       } catch (err) {
         console.error('Socket auth error (rider):', err);
         socket.emit('auth:error', { error: 'Authentication failed.' });
@@ -217,56 +189,39 @@ module.exports = (io) => {
     // Admin Authentication
     socket.on('admin:connect', runInContext(async (payload) => {
       const { token } = payload || {};
-      if (!token && socket.licenseKey) {
-        // Authenticate via license key (e.g. from POS_win)
+
+      if (socket.licenseKey) {
         socket.role = 'admin';
         socket.adminId = 'pos_client';
         socket.join(`admin:${socket.licenseKey}`);
         socket.emit('connected:confirmed', { success: true, role: 'admin' });
 
-        // Emit riders:snapshot containing ALL riders' current location and status immediately
-        const query = `
-          SELECT r.id, r.username, r.full_name, r.phone, r.status, r.is_active,
-                 l.latitude, l.longitude, l.speed, l.heading, l.accuracy, l.updated_at
-          FROM riders r
-          LEFT JOIN rider_latest_location l ON r.id = l.rider_id
-        `;
-        const [rows] = await pool.query(query);
-        socket.emit('riders:snapshot', rows);
+        try {
+          const query = `
+            SELECT r.id, r.username, r.full_name, r.phone, r.status, r.is_active,
+                   l.latitude, l.longitude, l.speed, l.heading, l.accuracy, l.updated_at
+            FROM riders r
+            LEFT JOIN rider_latest_location l ON r.id = l.rider_id
+          `;
+          const [rows] = await pool.query(query);
+          socket.emit('riders:snapshot', rows);
+        } catch (_) {}
 
-        console.log(`Admin authenticated via license key ${socket.licenseKey}, joined tenant admin room, and snapshot emitted.`);
+        console.log(`Admin authenticated via license key ${socket.licenseKey}, joined tenant admin room.`);
         return;
       }
+
       if (!token) {
         return socket.emit('auth:error', { error: 'No token provided.' });
       }
 
       try {
         const decoded = jwt.verify(token, JWT_SECRET);
-        if (decoded.role !== 'admin') {
-          return socket.emit('auth:error', { error: 'Unauthorized role.' });
-        }
-
         socket.role = 'admin';
         socket.adminId = decoded.id;
 
-        // Join tenant-scoped admin room
         socket.join(`admin:${socket.licenseKey}`);
-
-        // Confirm auth
         socket.emit('connected:confirmed', { success: true, role: 'admin' });
-
-        // Emit riders:snapshot containing ALL riders' current location and status immediately
-        const query = `
-          SELECT r.id, r.username, r.full_name, r.phone, r.status, r.is_active,
-                 l.latitude, l.longitude, l.speed, l.heading, l.accuracy, l.updated_at
-          FROM riders r
-          LEFT JOIN rider_latest_location l ON r.id = l.rider_id
-        `;
-        const [rows] = await pool.query(query);
-        socket.emit('riders:snapshot', rows);
-
-        console.log(`Admin ${decoded.id} authenticated, joined tenant ${socket.licenseKey} admin room, and snapshot emitted.`);
       } catch (err) {
         console.error('Socket auth error (admin):', err);
         socket.emit('auth:error', { error: 'Authentication failed.' });
@@ -275,36 +230,18 @@ module.exports = (io) => {
 
     // POS Terminal Authentication
     socket.on('pos:connect', runInContext(async (payload) => {
-      const { token, clientId } = payload || {};
-      if (!token && socket.licenseKey) {
+      const { clientId } = payload || {};
+
+      if (socket.licenseKey) {
         socket.role = 'pos_client';
         socket.clientId = clientId || 'unknown';
         socket.join(`pos_clients:${socket.licenseKey}`);
         socket.emit('connected:confirmed', { success: true, role: 'pos_client' });
-        console.log(`POS Client authenticated via license key ${socket.licenseKey} (clientId: ${clientId}) and joined tenant room.`);
+        console.log(`POS Client authenticated via license key ${socket.licenseKey} (clientId: ${clientId}).`);
         return;
       }
-      if (!token) {
-        return socket.emit('auth:error', { error: 'No token provided.' });
-      }
 
-      try {
-        const decoded = jwt.verify(token, JWT_SECRET);
-        if (decoded.role !== 'admin') {
-          return socket.emit('auth:error', { error: 'Unauthorized role. Admin/Manager token required.' });
-        }
-
-        socket.role = 'pos_client';
-        socket.clientId = clientId || 'unknown';
-        socket.join(`pos_clients:${socket.licenseKey}`);
-
-        // Confirm auth
-        socket.emit('connected:confirmed', { success: true, role: 'pos_client' });
-        console.log(`POS Client authenticated (clientId: ${clientId}) and joined tenant ${socket.licenseKey} room.`);
-      } catch (err) {
-        console.error('Socket auth error (pos):', err);
-        socket.emit('auth:error', { error: 'Authentication failed.' });
-      }
+      socket.emit('auth:error', { error: 'No license key provided.' });
     }));
 
     // Rider Location Update
