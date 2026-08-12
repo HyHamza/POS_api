@@ -31,12 +31,41 @@ function getRoleFilters(role, tableAlias) {
 }
 
 // ─── Convenience: emit a change to all connected WebSocket peers ──────────────
-function broadcastChange(restaurantId, payload, excludeDeviceId) {
+async function broadcastChange(restaurantId, payload, excludeDeviceId) {
   try {
     const broadcaster = require('../sockets/WebSocketBroadcaster');
     broadcaster.broadcast(restaurantId, payload, excludeDeviceId || null);
-  } catch (_) {}
+
+    // Also broadcast to Socket.IO clients (POS_app, Admin dashboard, etc.)
+    if (restaurantId && global.socketIoInstance) {
+      const [rows] = await pool.query('SELECT license_key FROM restaurants WHERE id = ?', [restaurantId]);
+      if (rows.length > 0) {
+        const licenseKey = rows[0].license_key;
+        const io = global.socketIoInstance;
+        const syncPushMsg = { type: 'sync_push', data: payload };
+
+        io.to(`admin:${licenseKey}`).emit('sync_push', syncPushMsg);
+        io.to(`pos_clients:${licenseKey}`).emit('sync_push', syncPushMsg);
+        io.to(`pos_clients:${licenseKey}`).emit('order:sync', syncPushMsg);
+
+        // If payload contains orders, emit order:new / order:updated specifically
+        const orders = payload.orders || (payload.pos_orders ? payload.pos_orders : null);
+        if (orders && Array.isArray(orders)) {
+          for (const order of orders) {
+            const eventName = (order.is_deleted || order.status === 'completed' || order.status === 'cancelled') 
+              ? 'order:updated' 
+              : 'order:new';
+            io.to(`admin:${licenseKey}`).emit(eventName, order);
+            io.to(`pos_clients:${licenseKey}`).emit(eventName, order);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[broadcastChange Warning] Socket.IO broadcast error:', err.message);
+  }
 }
+
 
 // ─── Full initial export (all tables, all rows, with counts) ─────────────────
 /**

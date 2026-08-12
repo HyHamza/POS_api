@@ -621,6 +621,7 @@ const io = socketIo(server, {
   }
 });
 app.set('io', io);
+global.socketIoInstance = io;
 
 // Helper to scope Socket.IO rooms dynamically by license key in Express controller contexts
 function getTenantIo(originalIo, licenseKey) {
