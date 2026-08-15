@@ -31,6 +31,8 @@ router.get('/my-stats', taskController.getMyRiderStats);
 router.get('/:id', bypassForRiders('dispatcher.view'), taskController.getTaskById);
 
 router.post('/', checkPermission('dispatcher.start'), taskController.createTask);
+router.put('/order/:orderNumber/status', taskController.updateTaskByOrderNumber);
+router.put('/by-order/:orderNumber', taskController.updateTaskByOrderNumber);
 router.put('/:id', taskController.updateTaskStatus);
 
 module.exports = router;

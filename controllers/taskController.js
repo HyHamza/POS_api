@@ -49,9 +49,9 @@ const getAllTasks = async (req, res) => {
       }
       query += ' ORDER BY t.created_at DESC';
     } else {
-      // Riders see their own tasks AND unassigned tasks that are pending, cooking, processing, or ready so they can claim them
+      // Riders see their own tasks AND unassigned tasks that are pending, cooking, processing, prepared, ready_for_dispatch, dispatched, or ready so they can claim them
       query = `SELECT * FROM _tasks_base 
-               WHERE restaurant_id = ? AND (rider_id = ? OR (rider_id IS NULL AND status IN ('pending', 'cooking', 'processing', 'ready'))) 
+               WHERE restaurant_id = ? AND (rider_id = ? OR (rider_id IS NULL AND status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'))) 
                ORDER BY created_at DESC`;
       params.push(restaurantId, id);
     }
@@ -256,7 +256,7 @@ const updateTaskStatus = async (req, res) => {
   const { status } = req.body;
   const { id: userId, role } = req.user;
 
-  const validStatuses = ['pending', 'assigned', 'accepted', 'cooking', 'processing', 'ready', 'delivering', 'delivered', 'cancelled'];
+  const validStatuses = ['pending', 'assigned', 'accepted', 'cooking', 'processing', 'ready', 'prepared', 'ready_for_dispatch', 'dispatched', 'delivering', 'delivered', 'cancelled'];
   if (!status || !validStatuses.includes(status)) {
     return res.status(400).json({
       success: false,
@@ -295,6 +295,17 @@ const updateTaskStatus = async (req, res) => {
     const task = rows[0];
     let alreadyUpdated = false;
 
+    // Guard: Riders cannot start delivery if the order has not been dispatched yet
+    if (role === 'rider' && status === 'delivering') {
+      if (!['dispatched', 'ready', 'ready_for_dispatch'].includes(task.status)) {
+        return res.status(400).json({
+          success: false,
+          data: null,
+          error: 'Cannot start delivery until the order has been dispatched by staff.'
+        });
+      }
+    }
+
     // FIX (Bug #8): Move the 'cancelled' admin-only guard BEFORE the rider path so it
     // applies universally regardless of which branch executes below.
     if (status === 'cancelled' && role !== 'admin') {
@@ -308,9 +319,9 @@ const updateTaskStatus = async (req, res) => {
     // Role-based validation
     if (role === 'rider' && task.rider_id !== userId) {
       // Allow the rider to accept/claim the task if it is currently unassigned (null)
-      if (status === 'accepted' && task.rider_id === null && ['pending', 'cooking', 'processing', 'ready'].includes(task.status)) {
+      if (status === 'accepted' && task.rider_id === null && ['pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'].includes(task.status)) {
         let targetStatus = 'accepted';
-        if (task.status === 'cooking' || task.status === 'processing') {
+        if (['cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched'].includes(task.status)) {
           targetStatus = task.status;
         }
 
@@ -560,12 +571,167 @@ const syncOrderStatusWithTask = async (pool, restaurantId, orderNumber, taskStat
   }
 };
 
+const updateTaskByOrderNumber = async (req, res) => {
+  const { orderNumber } = req.params;
+  const { status, rider_id } = req.body;
+
+  try {
+    const { asyncLocalStorage } = require('../config/db');
+    const store = asyncLocalStorage.getStore();
+    const restaurantId = store?.restaurantId || req.user?.restaurantId;
+
+    if (!restaurantId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: 'Restaurant context not found.'
+      });
+    }
+
+    const [taskRows] = await pool.query(
+      'SELECT * FROM _tasks_base WHERE order_number = ? AND restaurant_id = ? LIMIT 1',
+      [orderNumber, restaurantId]
+    );
+
+    if (taskRows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        error: 'Task not found for this order number.'
+      });
+    }
+
+    const task = taskRows[0];
+    let updateQuery = 'UPDATE _tasks_base SET status = ?';
+    const params = [status];
+
+    if (rider_id !== undefined) {
+      updateQuery += ', rider_id = ?';
+      params.push(rider_id || null);
+      if (rider_id) {
+        updateQuery += ', assigned_at = NOW()';
+      }
+    }
+
+    if (status === 'accepted') {
+      updateQuery += ', accepted_at = NOW()';
+    } else if (status === 'delivered') {
+      updateQuery += ', delivered_at = NOW()';
+    }
+
+    updateQuery += ' WHERE id = ? AND restaurant_id = ?';
+    params.push(task.id, restaurantId);
+
+    await pool.query(updateQuery, params);
+
+    const [updatedRows] = await pool.query(
+      `SELECT t.*, r.full_name as rider_name 
+       FROM _tasks_base t 
+       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
+       WHERE t.id = ? AND t.restaurant_id = ?`,
+      [task.id, restaurantId]
+    );
+    const updatedTask = updatedRows[0];
+
+    const io = req.app.get('io');
+    const licenseKey = req.headers['x-license-key'] || req.query.license_key;
+    if (io && licenseKey) {
+      io.to(`admin:${licenseKey}`).emit('task:status:update', updatedTask);
+      io.to(`riders:${licenseKey}`).emit('task:updated', updatedTask);
+      if (updatedTask && updatedTask.rider_id) {
+        io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: updatedTask,
+      error: null
+    });
+  } catch (error) {
+    console.error('Error updating task by order number:', error);
+    return res.status(500).json({
+      success: false,
+      data: null,
+      error: 'An internal server error occurred.'
+    });
+  }
+};
+
+const syncTaskWithOrderStatus = async (pool, restaurantId, orderNumber, orderStatus, licenseKey, io) => {
+  if (!orderNumber || !orderStatus) return;
+  try {
+    let taskStatus = null;
+    const lower = orderStatus.toLowerCase();
+    if (lower === 'ready_for_dispatch' || lower === 'prepared' || lower === 'ready') {
+      taskStatus = 'prepared';
+    } else if (lower === 'delivering' || lower === 'dispatched') {
+      taskStatus = 'dispatched';
+    } else if (lower === 'completed') {
+      taskStatus = 'delivered';
+    } else if (lower === 'cancelled') {
+      taskStatus = 'cancelled';
+    }
+
+    if (!taskStatus) return;
+
+    const [taskRows] = await pool.query(
+      'SELECT id, status, rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1',
+      [restaurantId, orderNumber]
+    );
+
+    if (taskRows.length === 0) return;
+    const currentTask = taskRows[0];
+
+    // Avoid regressing state if already delivering/delivered
+    if (currentTask.status === 'delivering' && taskStatus === 'dispatched') {
+      return;
+    }
+    if (currentTask.status === 'delivered' && taskStatus !== 'delivered') {
+      return;
+    }
+
+    await pool.query(
+      'UPDATE _tasks_base SET status = ? WHERE id = ? AND restaurant_id = ?',
+      [taskStatus, currentTask.id, restaurantId]
+    );
+
+    const [updatedRows] = await pool.query(
+      `SELECT t.*, r.full_name as rider_name 
+       FROM _tasks_base t 
+       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
+       WHERE t.id = ? AND t.restaurant_id = ?`,
+      [currentTask.id, restaurantId]
+    );
+    const updatedTask = updatedRows[0];
+
+    let finalLicenseKey = licenseKey;
+    if (!finalLicenseKey && restaurantId) {
+      const [restRows] = await pool.query('SELECT license_key FROM restaurants WHERE id = ?', [restaurantId]);
+      if (restRows.length > 0) finalLicenseKey = restRows[0].license_key;
+    }
+
+    if (io && finalLicenseKey && updatedTask) {
+      io.to(`admin:${finalLicenseKey}`).emit('task:status:update', updatedTask);
+      io.to(`riders:${finalLicenseKey}`).emit('task:updated', updatedTask);
+      if (updatedTask.rider_id) {
+        io.to(`rider:${finalLicenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+      }
+    }
+    console.log(`[Sync Helper] Synced task for order ${orderNumber} -> status: ${taskStatus}`);
+  } catch (err) {
+    console.error('[Sync Helper] Error syncing task with order status:', err.message);
+  }
+};
+
 module.exports = {
   getAllTasks,
   getTaskById,
   createTask,
   updateTaskStatus,
+  updateTaskByOrderNumber,
   getMyRiderStats,
-  syncOrderStatusWithTask
+  syncOrderStatusWithTask,
+  syncTaskWithOrderStatus
 };
 

@@ -636,6 +636,15 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
     await doUpdate(connection, cloudTable, clientTable, existing, row, incomingHlc, senderClientId, FIELD_LEVEL_TABLES, importErrors);
   }
 
+  // ── Sync linked Rider Task status when order status changes ────────
+  if (clientTable === 'orders' && row.order_number && row.status) {
+    try {
+      const { syncTaskWithOrderStatus } = require('./taskController');
+      const io = global.socketIoInstance;
+      await syncTaskWithOrderStatus(connection, restaurantId, row.order_number, row.status, null, io);
+    } catch (_) {}
+  }
+
   // ── Register event as processed ───────────────────────────────────
   if (restaurantId !== null && restaurantId !== undefined) {
     // V4 FIX: Store change_id, sync_device_id, AND txn_id
