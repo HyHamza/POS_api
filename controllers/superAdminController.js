@@ -754,7 +754,8 @@ const getAllEmployees = async (req, res) => {
  */
 const getSalesAnalytics = async (req, res) => {
   try {
-    const { restaurant_id, start_date, end_date, groupBy } = req.query;
+    const { restaurant_id, start_date, end_date, groupBy, sortBy = 'revenue' } = req.query;
+    const sortColumn = sortBy === 'quantity' ? 'total_quantity' : 'total_revenue';
     
     // Get total sales by restaurant
     let salesQuery = `
@@ -798,7 +799,7 @@ const getSalesAnalytics = async (req, res) => {
     
     const [salesByRestaurant] = await mainPool.query(salesQuery, params);
 
-    // Get top selling items globally
+    // Get top selling items globally (sorted by revenue or quantity)
     const [topItems] = await mainPool.query(`
       SELECT 
         oi.name as item_name,
@@ -815,7 +816,7 @@ const getSalesAnalytics = async (req, res) => {
       ${start_date ? 'AND o.created_at >= ?' : ''}
       ${end_date ? 'AND o.created_at <= ?' : ''}
       GROUP BY oi.name, r.id
-      ORDER BY total_revenue DESC
+      ORDER BY ${sortColumn} DESC
       LIMIT 50
     `, params);
 

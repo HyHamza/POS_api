@@ -543,6 +543,31 @@ async function testDbConnection() {
       )
     `);
 
+    // Dynamic super admin seeding & production security checks
+    try {
+      const bcrypt = require('bcryptjs');
+      const superAdminUsername = process.env.SUPER_ADMIN_USERNAME || 'admin';
+      const superAdminPassword = process.env.SUPER_ADMIN_PASSWORD || 'admin123';
+
+      if (process.env.NODE_ENV === 'production') {
+        if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'super_secret_jwt_key_restaurant_os_2026_x99') {
+          console.warn('\x1b[33m[SECURITY WARNING] Production environment detected with default or weak JWT_SECRET! Please set a strong random JWT_SECRET in .env\x1b[0m');
+        }
+        if (!process.env.SUPER_ADMIN_PASSWORD || process.env.SUPER_ADMIN_PASSWORD === 'admin123') {
+          console.warn('\x1b[33m[SECURITY WARNING] Production environment detected with default SUPER_ADMIN_PASSWORD ("admin123")! Please set a strong custom password in .env\x1b[0m');
+        }
+      }
+
+      const [existingSuper] = await pool.query('SELECT id FROM super_admins WHERE username = ?', [superAdminUsername]);
+      if (existingSuper.length === 0) {
+        const hash = await bcrypt.hash(superAdminPassword, 10);
+        await pool.query('INSERT INTO super_admins (username, password_hash) VALUES (?, ?)', [superAdminUsername, hash]);
+        console.log(`[Startup] Seeded initial super admin account: ${superAdminUsername}`);
+      }
+    } catch (adminSeedErr) {
+      console.error('[Startup] Failed to check/seed super admin account:', adminSeedErr.message);
+    }
+
     // Ensure sync_events table exists and has change_id, device_id, table_name, row_id, hlc, txn_id columns
     await pool.query(`
       CREATE TABLE IF NOT EXISTS sync_events (
