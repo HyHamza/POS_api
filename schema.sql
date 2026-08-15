@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS _pos_staff_base (
   status VARCHAR(50) DEFAULT 'Active',
   permissions TEXT DEFAULT NULL,
   daily_duty_hours INT DEFAULT 8,
+  assigned_categories TEXT DEFAULT NULL,
+  assigned_items TEXT DEFAULT NULL,
+  assigned_order_types TEXT DEFAULT NULL,
   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
   UNIQUE KEY (restaurant_id, username),
   FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
