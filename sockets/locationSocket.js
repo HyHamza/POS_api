@@ -11,6 +11,10 @@ const activeDevices = {
   // restaurantId: { rider: 0, pos: 0 }
 };
 
+// In-memory rate limiting map for location writes: Map<riderId, lastWriteTimestampMs>
+const lastLocationWriteTimes = new Map();
+const LOCATION_WRITE_MIN_INTERVAL_MS = 2500; // max 1 DB write per 2.5s per rider
+
 function getConnectedDeviceCounts(restaurantId) {
   return activeDevices[restaurantId] || { rider: 0, pos: 0 };
 }
@@ -322,25 +326,32 @@ module.exports = (io) => {
 
       const riderId = socket.riderId;
       const timestamp = new Date();
+      const nowMs = Date.now();
+      const lastWriteMs = lastLocationWriteTimes.get(riderId) || 0;
 
-      // NON-BLOCKING database writes (do not await, catch errors)
-      // 1. Upsert into latest location cache table
-      pool.query(
-        `INSERT INTO rider_latest_location (rider_id, latitude, longitude, speed, heading, accuracy, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, NOW(3))
-         ON DUPLICATE KEY UPDATE latitude=VALUES(latitude), longitude=VALUES(longitude),
-         speed=VALUES(speed), heading=VALUES(heading), accuracy=VALUES(accuracy), updated_at=NOW(3)`,
-        [riderId, lat, lng, speed || 0, heading || 0, accuracy || 0]
-      ).catch(err => console.error('Rider location upsert error:', err));
+      // Rate limit high-write DB operations (at most 1 write per 2.5s per rider)
+      if (nowMs - lastWriteMs >= LOCATION_WRITE_MIN_INTERVAL_MS) {
+        lastLocationWriteTimes.set(riderId, nowMs);
 
-      // 2. Insert into high-write location history log
-      pool.query(
-        `INSERT INTO rider_locations (rider_id, latitude, longitude, speed, heading, accuracy, recorded_at)
-         VALUES (?, ?, ?, ?, ?, ?, NOW(3))`,
-        [riderId, lat, lng, speed || 0, heading || 0, accuracy || 0]
-      ).catch(err => console.error('Rider location history log error:', err));
+        // NON-BLOCKING database writes (do not await, catch errors)
+        // 1. Upsert into latest location cache table
+        pool.query(
+          `INSERT INTO rider_latest_location (rider_id, latitude, longitude, speed, heading, accuracy, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW(3))
+           ON DUPLICATE KEY UPDATE latitude=VALUES(latitude), longitude=VALUES(longitude),
+           speed=VALUES(speed), heading=VALUES(heading), accuracy=VALUES(accuracy), updated_at=NOW(3)`,
+          [riderId, lat, lng, speed || 0, heading || 0, accuracy || 0]
+        ).catch(err => console.error('Rider location upsert error:', err));
 
-      // 3. Broadcast real-time update to all tenant admins
+        // 2. Insert into high-write location history log
+        pool.query(
+          `INSERT INTO rider_locations (rider_id, latitude, longitude, speed, heading, accuracy, recorded_at)
+           VALUES (?, ?, ?, ?, ?, ?, NOW(3))`,
+          [riderId, lat, lng, speed || 0, heading || 0, accuracy || 0]
+        ).catch(err => console.error('Rider location history log error:', err));
+      }
+
+      // 3. Broadcast real-time update immediately to all tenant admins
       io.to(`admin:${socket.licenseKey}`).emit('rider:location:update', {
         riderId,
         lat,

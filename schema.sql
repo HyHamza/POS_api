@@ -118,6 +118,46 @@ CREATE TABLE IF NOT EXISTS _pos_menu_items_base (
   FOREIGN KEY (category_id) REFERENCES _pos_menu_categories_base(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+CREATE TABLE IF NOT EXISTS _pos_deals_base (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  restaurant_id    INT NOT NULL,
+  name             VARCHAR(255) NOT NULL,
+  description      TEXT,
+  price            DOUBLE NOT NULL DEFAULT 0,
+  cost_price       DOUBLE DEFAULT 0,
+  image_path       VARCHAR(255) DEFAULT NULL,
+  is_active        TINYINT DEFAULT 1,
+  is_deleted       TINYINT DEFAULT 0,
+  deleted_at       DATETIME DEFAULT NULL,
+  hlc              VARCHAR(255) DEFAULT NULL,
+  sync_device_id   VARCHAR(64) DEFAULT NULL,
+  origin_device_id VARCHAR(255) DEFAULT NULL,
+  created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uq_deals_rest_name (restaurant_id, name),
+  INDEX idx_deals_active (restaurant_id, is_active, is_deleted),
+  FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+CREATE TABLE IF NOT EXISTS _pos_deal_items_base (
+  id               INT AUTO_INCREMENT PRIMARY KEY,
+  restaurant_id    INT NOT NULL,
+  deal_id          INT NOT NULL,
+  menu_item_id     INT NOT NULL,
+  quantity         INT NOT NULL DEFAULT 1,
+  is_deleted       TINYINT DEFAULT 0,
+  deleted_at       DATETIME DEFAULT NULL,
+  hlc              VARCHAR(255) DEFAULT NULL,
+  sync_device_id   VARCHAR(64) DEFAULT NULL,
+  origin_device_id VARCHAR(255) DEFAULT NULL,
+  created_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at       DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_deal_items_deal (restaurant_id, deal_id),
+  FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE,
+  FOREIGN KEY (deal_id) REFERENCES _pos_deals_base(id) ON DELETE CASCADE,
+  FOREIGN KEY (menu_item_id) REFERENCES _pos_menu_items_base(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 CREATE TABLE IF NOT EXISTS _pos_floors_base (
   id INT AUTO_INCREMENT PRIMARY KEY,
   restaurant_id INT NOT NULL,
@@ -184,9 +224,11 @@ CREATE TABLE IF NOT EXISTS _pos_order_items_base (
   price DOUBLE NOT NULL,
   quantity INT NOT NULL DEFAULT 1,
   notes TEXT,
+  deal_id INT DEFAULT NULL,
   FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE,
   FOREIGN KEY (order_id) REFERENCES _pos_orders_base(id) ON DELETE CASCADE,
-  FOREIGN KEY (menu_item_id) REFERENCES _pos_menu_items_base(id) ON DELETE SET NULL
+  FOREIGN KEY (menu_item_id) REFERENCES _pos_menu_items_base(id) ON DELETE SET NULL,
+  FOREIGN KEY (deal_id) REFERENCES _pos_deals_base(id) ON DELETE SET NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 CREATE TABLE IF NOT EXISTS _pos_inventory_items_base (
@@ -391,6 +433,8 @@ CREATE OR REPLACE VIEW rider_locations AS SELECT * FROM _rider_locations_base WH
 CREATE OR REPLACE VIEW rider_sessions AS SELECT * FROM _rider_sessions_base WHERE restaurant_id = current_restaurant_id();
 CREATE OR REPLACE VIEW riders AS SELECT * FROM _riders_base WHERE restaurant_id = current_restaurant_id();
 CREATE OR REPLACE VIEW tasks AS SELECT * FROM _tasks_base WHERE restaurant_id = current_restaurant_id();
+CREATE OR REPLACE VIEW pos_deals AS SELECT * FROM _pos_deals_base WHERE restaurant_id = current_restaurant_id();
+CREATE OR REPLACE VIEW pos_deal_items AS SELECT * FROM _pos_deal_items_base WHERE restaurant_id = current_restaurant_id();
 CREATE OR REPLACE VIEW pos_system_logs AS SELECT * FROM _pos_system_logs_base WHERE restaurant_id = current_restaurant_id() WITH CHECK OPTION;
 CREATE OR REPLACE VIEW pos_activity_logs AS SELECT * FROM _pos_activity_logs_base WHERE restaurant_id = current_restaurant_id() WITH CHECK OPTION;
 CREATE OR REPLACE VIEW pos_notifications AS SELECT * FROM _pos_notifications_base WHERE restaurant_id = current_restaurant_id() WITH CHECK OPTION;
@@ -398,6 +442,12 @@ CREATE OR REPLACE VIEW pos_notifications AS SELECT * FROM _pos_notifications_bas
 -- ─── Single-Statement Tenant Identity Triggers ────────────────────────────────
 DROP TRIGGER IF EXISTS t_admins_insert;
 CREATE TRIGGER t_admins_insert BEFORE INSERT ON _admins_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);
+
+DROP TRIGGER IF EXISTS t_pos_deals_insert;
+CREATE TRIGGER t_pos_deals_insert BEFORE INSERT ON _pos_deals_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);
+
+DROP TRIGGER IF EXISTS t_pos_deal_items_insert;
+CREATE TRIGGER t_pos_deal_items_insert BEFORE INSERT ON _pos_deal_items_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);
 
 DROP TRIGGER IF EXISTS t_pos_attendance_insert;
 CREATE TRIGGER t_pos_attendance_insert BEFORE INSERT ON _pos_attendance_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);

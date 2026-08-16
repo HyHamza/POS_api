@@ -403,6 +403,7 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
 
     const tableMap = {
       settings:        '_pos_settings_base',
+      admins:          '_admins_base',
       menu_categories: '_pos_menu_categories_base',
       menu_items:      '_pos_menu_items_base',
       deals:           '_pos_deals_base',

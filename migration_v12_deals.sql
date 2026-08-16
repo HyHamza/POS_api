@@ -60,41 +60,11 @@ CREATE OR REPLACE VIEW pos_deal_items AS
 SELECT * FROM _pos_deal_items_base
 WHERE restaurant_id = current_restaurant_id();
 
--- 5. Create multi-tenant triggers for pos_deals view
-DROP TRIGGER IF EXISTS pos_deals_insert_trigger;
-DELIMITER $$
-CREATE TRIGGER pos_deals_insert_trigger
-INSTEAD OF INSERT ON pos_deals
-FOR EACH ROW
-BEGIN
-  INSERT INTO _pos_deals_base (
-    restaurant_id, name, description, price, cost_price, image_path,
-    is_active, is_deleted, deleted_at, hlc, sync_device_id, origin_device_id,
-    created_at, updated_at
-  ) VALUES (
-    current_restaurant_id(), NEW.name, NEW.description, NEW.price, NEW.cost_price, NEW.image_path,
-    COALESCE(NEW.is_active, 1), COALESCE(NEW.is_deleted, 0), NEW.deleted_at, NEW.hlc, NEW.sync_device_id, NEW.origin_device_id,
-    COALESCE(NEW.created_at, CURRENT_TIMESTAMP), COALESCE(NEW.updated_at, CURRENT_TIMESTAMP)
-  );
-END$$
-DELIMITER ;
+-- 5. Create multi-tenant BEFORE INSERT triggers
+DROP TRIGGER IF EXISTS t_pos_deals_insert;
+CREATE TRIGGER t_pos_deals_insert BEFORE INSERT ON _pos_deals_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);
 
-DROP TRIGGER IF EXISTS pos_deal_items_insert_trigger;
-DELIMITER $$
-CREATE TRIGGER pos_deal_items_insert_trigger
-INSTEAD OF INSERT ON pos_deal_items
-FOR EACH ROW
-BEGIN
-  INSERT INTO _pos_deal_items_base (
-    restaurant_id, deal_id, menu_item_id, quantity,
-    is_deleted, deleted_at, hlc, sync_device_id, origin_device_id,
-    created_at, updated_at
-  ) VALUES (
-    current_restaurant_id(), NEW.deal_id, NEW.menu_item_id, COALESCE(NEW.quantity, 1),
-    COALESCE(NEW.is_deleted, 0), NEW.deleted_at, NEW.hlc, NEW.sync_device_id, NEW.origin_device_id,
-    COALESCE(NEW.created_at, CURRENT_TIMESTAMP), COALESCE(NEW.updated_at, CURRENT_TIMESTAMP)
-  );
-END$$
-DELIMITER ;
+DROP TRIGGER IF EXISTS t_pos_deal_items_insert;
+CREATE TRIGGER t_pos_deal_items_insert BEFORE INSERT ON _pos_deal_items_base FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id);
 
 SET FOREIGN_KEY_CHECKS = 1;

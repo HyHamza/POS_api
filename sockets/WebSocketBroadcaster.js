@@ -18,8 +18,9 @@ class WebSocketBroadcaster {
     this.wss = null;
 
     // Rate limit configuration per socket
-    this.RATE_LIMIT_TOKENS = 50; // max bursts
-    this.RATE_LIMIT_REFILL_RATE = 10; // tokens per second
+    this.RATE_LIMIT_TOKENS = 150; // max burst capacity
+    this.RATE_LIMIT_REFILL_RATE = 30; // tokens per second
+    this.lastWarnLogTimes = new Map(); // deviceId -> timestamp of last warning log
 
     // Heartbeat configuration
     this.HEARTBEAT_INTERVAL = 30000; // 30 seconds
@@ -97,29 +98,42 @@ class WebSocketBroadcaster {
       });
 
       ws.on('message', (message) => {
-        // Enforce rate limit
+        let parsedData = null;
+        try {
+          parsedData = JSON.parse(message);
+        } catch (_) {}
+
+        // Fast-path heartbeat ping (does not consume rate limit tokens)
+        if (parsedData && parsedData.type === 'ping') {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'pong' }));
+          }
+          return;
+        }
+
+        // Enforce token bucket rate limit for data frames
         const now = Date.now();
         const elapsed = (now - ws.lastTokenRefill) / 1000;
         ws.tokens = Math.min(this.RATE_LIMIT_TOKENS, ws.tokens + elapsed * this.RATE_LIMIT_REFILL_RATE);
         ws.lastTokenRefill = now;
 
         if (ws.tokens < 1) {
-          console.warn(`[WebSocket] Device ${ws.deviceId} rate-limited.`);
+          const lastWarn = this.lastWarnLogTimes.get(ws.deviceId) || 0;
+          if (now - lastWarn > 5000) {
+            console.warn(`[WebSocket] Device ${ws.deviceId} rate-limited. Throttling messages.`);
+            this.lastWarnLogTimes.set(ws.deviceId, now);
+          }
           return; // Drop excess messages
         }
         ws.tokens -= 1;
 
         try {
-          const data = JSON.parse(message);
-
-          if (data.type === 'ping') {
-            ws.send(JSON.stringify({ type: 'pong' }));
-          } else if (data.type === 'sync_push' && data.data) {
+          if (parsedData && parsedData.type === 'sync_push' && parsedData.data) {
             // Real-time sync push from a device — merge into MySQL and broadcast
-            this._handleSyncPush(ws, data.data);
+            this._handleSyncPush(ws, parsedData.data);
           }
         } catch (e) {
-          // Ignore invalid JSON
+          // Ignore processing errors
         }
       });
 

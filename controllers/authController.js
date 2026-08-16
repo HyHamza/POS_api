@@ -443,6 +443,8 @@ const verifyLicense = async (req, res) => {
         expiresAt: expiresAtMs,
         serverTime: Date.now(),
         restaurantName: name,
+        restaurantId: id,
+        restaurant_id: id,
         staffList: staffRows.map(s => ({
           username: s.username,
           pinHash: s.pin_hash,
