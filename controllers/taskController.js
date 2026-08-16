@@ -726,6 +726,11 @@ const syncTaskWithOrderStatus = async (dbPool, restaurantId, orderNumber, orderS
       if (taskRows.length === 0) return;
       const currentTask = taskRows[0];
 
+      // If task is already in the target status, avoid redundant updates and socket emissions
+      if (currentTask.status === taskStatus) {
+        return;
+      }
+
       // Avoid regressing state if already delivering/delivered
       if (currentTask.status === 'delivering' && taskStatus === 'dispatched') {
         return;
