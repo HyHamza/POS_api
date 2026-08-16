@@ -81,12 +81,15 @@ const riderLogin = async (req, res) => {
     const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
     const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
 
+    const isOnDuty = await isRiderDutyActive(rider.id, restaurantId);
+    const initialStatus = isOnDuty ? 'idle' : 'offline';
+
     // FIX (Bug #6): Store a hash of the refresh token so we can invalidate it on logout.
     const crypto = require('crypto');
     const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
     await pool.query(
       'UPDATE _riders_base SET status = ?, refresh_token_hash = ? WHERE id = ? AND restaurant_id = ?',
-      ['idle', refreshTokenHash, rider.id, restaurantId]
+      [initialStatus, refreshTokenHash, rider.id, restaurantId]
     );
 
     return res.json({
@@ -99,7 +102,8 @@ const riderLogin = async (req, res) => {
           username: rider.username,
           full_name: rider.full_name,
           phone: rider.phone,
-          status: 'idle',
+          status: initialStatus,
+          isClockedIn: isOnDuty,
           restaurantId: rider.restaurant_id
         }
       },
@@ -282,28 +286,59 @@ const refreshToken = async (req, res) => {
   }
 };
 
+async function isRiderDutyActive(riderId, restaurantId) {
+  try {
+    if (!riderId || !restaurantId) return false;
+
+    // Strict check: Open attendance record in _pos_attendance_base
+    const [rows] = await pool.query(
+      `SELECT a.id, a.clock_in FROM _pos_attendance_base a
+       LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+       LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
+       WHERE a.restaurant_id = ?
+         AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+         AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+         AND (r.id = ? OR a.staff_id = ?)
+       LIMIT 1`,
+      [restaurantId, riderId, riderId]
+    );
+
+    return rows.length > 0;
+  } catch (err) {
+    console.error('[isRiderDutyActive Error]', err);
+    return false;
+  }
+}
+
 const getRiderDutyStatus = async (req, res) => {
   const riderId = req.user.id;
   const restaurantId = req.user.restaurantId; // Should be in JWT payload
   
   try {
-    // FIX (Bug #1): Add explicit restaurant_id filters to all queries
-    const [rows] = await pool.query(
-      `SELECT a.id, a.clock_in 
-       FROM _pos_attendance_base a
-       JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-       JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
-       WHERE r.id = ? AND r.restaurant_id = ? AND a.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-      [riderId, restaurantId, restaurantId]
-    );
+    const isOnDuty = await isRiderDutyActive(riderId, restaurantId);
 
-    const isOnDuty = rows.length > 0;
+    // Get clock in time if available
+    let clockInTime = null;
+    try {
+      const [rows] = await pool.query(
+        `SELECT a.clock_in FROM _pos_attendance_base a
+         LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+         LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
+         WHERE a.restaurant_id = ?
+           AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+           AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+           AND (r.id = ? OR a.staff_id = ?)
+         ORDER BY a.id DESC LIMIT 1`,
+        [restaurantId, riderId, riderId]
+      );
+      if (rows.length > 0) clockInTime = rows[0].clock_in;
+    } catch (_) {}
 
     return res.json({
       success: true,
       data: {
         isOnDuty,
-        clockInTime: isOnDuty ? rows[0].clock_in : null
+        clockInTime: clockInTime || (isOnDuty ? new Date().toISOString() : null)
       },
       error: null
     });
@@ -322,17 +357,9 @@ const riderLogout = async (req, res) => {
   const restaurantId = req.user.restaurantId; // Should be in JWT payload
 
   try {
-    // FIX (Bug #1): Add restaurant_id filters to all queries
-    // Check if clocked in (on duty)
-    const [attendance] = await pool.query(
-      `SELECT a.id FROM _pos_attendance_base a
-       JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-       JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
-       WHERE r.id = ? AND r.restaurant_id = ? AND a.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-      [riderId, restaurantId, restaurantId]
-    );
+    const isOnDuty = await isRiderDutyActive(riderId, restaurantId);
 
-    if (attendance.length > 0) {
+    if (isOnDuty) {
       return res.status(400).json({
         success: false,
         data: null,
@@ -340,8 +367,7 @@ const riderLogout = async (req, res) => {
       });
     }
 
-    // FIX (Bug #6): Invalidate the refresh token by clearing its stored hash,
-    // preventing post-logout token reuse for the 7-day JWT lifetime.
+    // Invalidate the refresh token by clearing its stored hash
     await pool.query(
       'UPDATE _riders_base SET status = ?, refresh_token_hash = NULL WHERE id = ? AND restaurant_id = ?',
       ['offline', riderId, restaurantId]
@@ -529,12 +555,14 @@ const staffLogin = async (req, res) => {
       }
     }
 
-    // Check attendance status today
+    // Check attendance status (any active open session)
     const [attRows] = await pool.query(
       `SELECT id, clock_in FROM _pos_attendance_base 
-       WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL 
+       WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
+         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+         AND (is_deleted IS NULL OR is_deleted = 0)
        ORDER BY id DESC LIMIT 1`,
-      [staff.id, restaurantId]
+      [staff.id, staff.username, restaurantId]
     );
 
     const isClockedIn = attRows.length > 0;
@@ -584,15 +612,14 @@ const staffLogin = async (req, res) => {
 };
 
 const unifiedLogin = async (req, res) => {
-  const { username, credential, password, pin } = req.body;
-  const cred = credential || password || pin;
-  const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.body.license_key;
+  const { username, credential } = req.body;
+  const licenseKey = req.headers['x-license-key'] || req.query.license_key;
 
-  if (!username || !cred) {
+  if (!username || !credential) {
     return res.status(400).json({
       success: false,
       data: null,
-      error: 'Username and credentials are required.'
+      error: 'Username and credential (PIN or Password) are required.'
     });
   }
 
@@ -600,7 +627,7 @@ const unifiedLogin = async (req, res) => {
     return res.status(400).json({
       success: false,
       data: null,
-      error: 'License key is required.'
+      error: 'License key (x-license-key header) is required.'
     });
   }
 
@@ -618,23 +645,23 @@ const unifiedLogin = async (req, res) => {
 
     const restaurantId = resolved.restaurantId;
     const cleanUsername = username.trim();
-    const cleanCred = String(cred).trim();
+    const cleanCred = String(credential).trim();
 
-    // 1. Try Staff PIN match first
+    // 1. Try Staff PIN
     const crypto = require('crypto');
     const inputPinHash = crypto.createHash('sha256').update(cleanCred).digest('hex');
 
     const [staffRows] = await pool.query(
       `SELECT id, restaurant_id, name, username, pin_hash, role_id, role, status, permissions,
-              assigned_categories, assigned_items, assigned_order_types 
-       FROM _pos_staff_base 
+              assigned_categories, assigned_items, assigned_order_types
+       FROM _pos_staff_base
        WHERE username = ? AND restaurant_id = ?`,
       [cleanUsername, restaurantId]
     );
 
     if (staffRows.length > 0) {
       const staff = staffRows[0];
-      if (staff.pin_hash === inputPinHash && staff.status === 'Active') {
+      if (staff.status === 'Active' && staff.pin_hash === inputPinHash) {
         let parsedPermissions = [];
         if (staff.permissions) {
           try {
@@ -646,9 +673,11 @@ const unifiedLogin = async (req, res) => {
 
         const [attRows] = await pool.query(
           `SELECT id, clock_in FROM _pos_attendance_base 
-           WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL 
+           WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
+             AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+             AND (is_deleted IS NULL OR is_deleted = 0)
            ORDER BY id DESC LIMIT 1`,
-          [staff.id, restaurantId]
+          [staff.id, staff.username, restaurantId]
         );
 
         const isClockedIn = attRows.length > 0;
@@ -705,21 +734,32 @@ const unifiedLogin = async (req, res) => {
           const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
           const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
 
+          const isOnDuty = await isRiderDutyActive(rider.id, restaurantId);
+          const initialStatus = isOnDuty ? 'idle' : 'offline';
+
           const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
           await pool.query(
             'UPDATE _riders_base SET status = ?, refresh_token_hash = ? WHERE id = ? AND restaurant_id = ?',
-            ['idle', refreshTokenHash, rider.id, restaurantId]
+            [initialStatus, refreshTokenHash, rider.id, restaurantId]
           );
 
-          // Check if rider is clocked in today
-          const [attRows] = await pool.query(
-            `SELECT a.id, a.clock_in FROM _pos_attendance_base a
-             JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-             WHERE s.username = ? AND a.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-            [rider.username, restaurantId]
-          );
-
-          const isClockedIn = attRows.length > 0;
+          let clockInTime = null;
+          if (isOnDuty) {
+            try {
+              const [attRows] = await pool.query(
+                `SELECT a.clock_in FROM _pos_attendance_base a
+                 LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+                 LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
+                 WHERE a.restaurant_id = ?
+                   AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+                   AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+                   AND (r.id = ? OR a.staff_id = ?)
+                 ORDER BY a.id DESC LIMIT 1`,
+                [restaurantId, rider.id, rider.id]
+              );
+              if (attRows.length > 0) clockInTime = attRows[0].clock_in;
+            } catch (_) {}
+          }
 
           return res.json({
             success: true,
@@ -733,9 +773,9 @@ const unifiedLogin = async (req, res) => {
                 username: rider.username,
                 full_name: rider.full_name,
                 phone: rider.phone,
-                status: 'idle',
-                isClockedIn,
-                clockInTime: isClockedIn ? attRows[0].clock_in : null,
+                status: initialStatus,
+                isClockedIn: isOnDuty,
+                clockInTime: isOnDuty ? (clockInTime || new Date().toISOString()) : null,
                 restaurantId: rider.restaurant_id
               }
             },
@@ -763,13 +803,13 @@ const unifiedLogin = async (req, res) => {
           success: true,
           data: {
             userType: 'admin',
-            role: 'admin',
+            role: 'Admin',
             accessToken,
             refreshToken,
             user: {
               id: admin.id,
               username: admin.username,
-              role: 'admin',
+              role: 'Admin',
               restaurantId: admin.restaurant_id
             }
           },
@@ -828,11 +868,14 @@ const riderClockIn = async (req, res) => {
       staffId = insStaff.insertId;
     }
 
-    // Check if already clocked in today
+    // Check if already has open attendance session
     const [openAttendance] = await pool.query(
       `SELECT id, clock_in FROM _pos_attendance_base 
-       WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL`,
-      [staffId, restaurantId]
+       WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
+         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+         AND (is_deleted IS NULL OR is_deleted = 0)
+       ORDER BY id DESC LIMIT 1`,
+      [staffId, riderId, restaurantId]
     );
 
     let attId = null;
@@ -908,14 +951,14 @@ const riderClockOut = async (req, res) => {
 
     let staffId = staffRows.length > 0 ? staffRows[0].id : null;
 
-    if (staffId) {
-      await pool.query(
-        `UPDATE _pos_attendance_base 
-         SET clock_out = NOW() 
-         WHERE staff_id = ? AND restaurant_id = ? AND clock_out IS NULL`,
-        [staffId, restaurantId]
-      );
-    }
+    // Close any open attendance sessions for this rider
+    await pool.query(
+      `UPDATE _pos_attendance_base 
+       SET clock_out = NOW() 
+       WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
+         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')`,
+      [staffId || riderId, riderId, restaurantId]
+    );
 
     // Set rider status to offline
     await pool.query(
@@ -958,5 +1001,6 @@ module.exports = {
   getRiderDutyStatus,
   riderClockIn,
   riderClockOut,
-  verifyLicense
+  verifyLicense,
+  isRiderDutyActive
 };

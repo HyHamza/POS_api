@@ -17,13 +17,21 @@ function getConnectedDeviceCounts(restaurantId) {
 
 async function isRiderClockedIn(riderId, restaurantId) {
   try {
+    if (!riderId || !restaurantId) return false;
+
+    // Strict check: Open attendance record in _pos_attendance_base
     const [rows] = await pool.query(
       `SELECT a.id, a.clock_in FROM _pos_attendance_base a
-       JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-       JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
-       WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-      [riderId, restaurantId]
+       LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+       LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
+       WHERE a.restaurant_id = ?
+         AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+         AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+         AND (r.id = ? OR a.staff_id = ?)
+       LIMIT 1`,
+      [restaurantId, riderId, riderId]
     );
+
     return rows.length > 0;
   } catch (err) {
     console.error('[isRiderClockedIn Error]', err);
@@ -292,6 +300,7 @@ module.exports = (io) => {
         socket.role = 'pos_client';
         socket.clientId = clientId || 'unknown';
         socket.join(`pos_clients:${socket.licenseKey}`);
+        socket.join(`admin:${socket.licenseKey}`);
         socket.emit('connected:confirmed', { success: true, role: 'pos_client' });
         console.log(`POS Client authenticated via license key ${socket.licenseKey} (clientId: ${clientId}).`);
         return;
@@ -532,7 +541,12 @@ module.exports = (io) => {
         }
 
         io.to(`admin:${socket.licenseKey}`).emit('task:status:update', updatedRows[0]);
+        io.to(`pos_clients:${socket.licenseKey}`).emit('task:status:update', updatedRows[0]);
+        io.to(`riders:${socket.licenseKey}`).emit('task:claimed', { taskId, riderId, task: updatedRows[0] });
+        io.to(`admin:${socket.licenseKey}`).emit('task:claimed', { taskId, riderId, task: updatedRows[0] });
+        io.to(`pos_clients:${socket.licenseKey}`).emit('task:claimed', { taskId, riderId, task: updatedRows[0] });
         io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
+        io.to(`pos_clients:${socket.licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
         socket.emit('task:accept:success', { taskId, task: updatedRows[0] });
 
         console.log(`Rider ${riderId} accepted task ${taskId}`);
@@ -573,7 +587,11 @@ module.exports = (io) => {
         );
 
         io.to(`admin:${socket.licenseKey}`).emit('task:status:update', updatedRows[0]);
+        io.to(`pos_clients:${socket.licenseKey}`).emit('task:status:update', updatedRows[0]);
+        io.to(`riders:${socket.licenseKey}`).emit('task:updated', updatedRows[0]);
+        io.to(`pos_clients:${socket.licenseKey}`).emit('task:updated', updatedRows[0]);
         io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
+        io.to(`pos_clients:${socket.licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
         console.log(`Rider ${riderId} completed delivery for task ${taskId}`);
       } catch (err) {
         console.error('Rider task delivered DB error:', err);

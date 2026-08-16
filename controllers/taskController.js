@@ -49,11 +49,23 @@ const getAllTasks = async (req, res) => {
       }
       query += ' ORDER BY t.created_at DESC';
     } else {
-      // Riders see their own tasks AND unassigned tasks that are pending, cooking, processing, prepared, ready_for_dispatch, dispatched, or ready so they can claim them
-      query = `SELECT * FROM _tasks_base 
-               WHERE restaurant_id = ? AND (rider_id = ? OR (rider_id IS NULL AND status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'))) 
-               ORDER BY created_at DESC`;
-      params.push(restaurantId, id);
+      // For riders: verify clock-in status before returning unassigned tasks
+      const { isRiderDutyActive } = require('./authController');
+      const isClockedIn = await isRiderDutyActive(id, restaurantId);
+
+      if (isClockedIn) {
+        // Clocked-in riders see their own tasks AND unassigned tasks that are pending, cooking, processing, prepared, ready_for_dispatch, dispatched, or ready so they can claim them
+        query = `SELECT * FROM _tasks_base 
+                 WHERE restaurant_id = ? AND (rider_id = ? OR (rider_id IS NULL AND status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'))) 
+                 ORDER BY created_at DESC`;
+        params.push(restaurantId, id);
+      } else {
+        // Clocked-out riders only see tasks explicitly assigned to them (or empty if none)
+        query = `SELECT * FROM _tasks_base 
+                 WHERE restaurant_id = ? AND rider_id = ? 
+                 ORDER BY created_at DESC`;
+        params.push(restaurantId, id);
+      }
     }
 
     const [rows] = await pool.query(query, params);
@@ -210,16 +222,11 @@ const createTask = async (req, res) => {
     // Trigger Socket.IO and FCM
     const io = req.app.get('io');
     const licenseKey = req.headers['x-license-key'] || req.query.license_key;
+    const { isRiderDutyActive } = require('./authController');
+
     if (rider_id) {
-      // Server-Side Clock-In Verification for specific rider
-      const [attRows] = await pool.query(
-        `SELECT a.id FROM _pos_attendance_base a
-         JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-         JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
-         WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-        [rider_id, restaurantId]
-      );
-      const isClockedIn = attRows.length > 0;
+      // Server-Side Duty Verification for specific rider
+      const isClockedIn = await isRiderDutyActive(rider_id, restaurantId);
 
       if (isClockedIn) {
         if (io) {
@@ -243,10 +250,16 @@ const createTask = async (req, res) => {
       // Send background push notification only to active AND clocked-in riders of this restaurant
       pool.query(
         `SELECT r.id FROM _riders_base r
-         JOIN _pos_staff_base s ON r.username = s.username AND r.restaurant_id = s.restaurant_id
-         JOIN _pos_attendance_base a ON a.staff_id = s.id AND a.restaurant_id = s.restaurant_id
          WHERE r.restaurant_id = ? AND r.is_active = 1 AND r.fcm_token IS NOT NULL
-           AND a.date = CURDATE() AND a.clock_out IS NULL`,
+           AND EXISTS (
+             SELECT 1 FROM _pos_attendance_base a
+             WHERE a.restaurant_id = r.restaurant_id
+               AND (a.staff_id = r.id OR a.staff_id IN (
+                 SELECT s.id FROM _pos_staff_base s WHERE s.username = r.username AND s.restaurant_id = r.restaurant_id
+               ))
+               AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+               AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+           )`,
         [restaurantId]
       )
         .then(([riders]) => {
@@ -302,14 +315,9 @@ const updateTaskStatus = async (req, res) => {
 
     // Server-side Rider Duty Check: Riders must be clocked in to accept or update tasks
     if (role === 'rider') {
-      const [dutyRows] = await pool.query(
-        `SELECT a.id FROM _pos_attendance_base a
-         JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
-         JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
-         WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
-        [userId, restaurantId]
-      );
-      if (dutyRows.length === 0) {
+      const { isRiderDutyActive } = require('./authController');
+      const isClocked = await isRiderDutyActive(userId, restaurantId);
+      if (!isClocked) {
         return res.status(403).json({
           success: false,
           data: null,
@@ -477,18 +485,22 @@ const updateTaskStatus = async (req, res) => {
     const io = req.app.get('io');
     const licenseKey = req.headers['x-license-key'] || req.query.license_key;
     if (io) {
-      // Broadcast to admin room about task status change
+      // Broadcast to admin and pos_clients rooms about task status change
       io.to(`admin:${licenseKey}`).emit('task:status:update', updatedTask);
-      console.log(`[Rider API] Broadcasted socket event 'task:status:update' to admin:${licenseKey} for Task ID: ${id}, Status: ${status}`);
+      io.to(`pos_clients:${licenseKey}`).emit('task:status:update', updatedTask);
+      console.log(`[Rider API] Broadcasted socket event 'task:status:update' to admin:${licenseKey} and pos_clients:${licenseKey} for Task ID: ${id}, Status: ${status}`);
 
       // Broadcast task update to all riders in this restaurant
       io.to(`riders:${licenseKey}`).emit('task:updated', updatedTask);
+      io.to(`pos_clients:${licenseKey}`).emit('task:updated', updatedTask);
 
       // If assigned to a rider specifically
       if (updatedTask && updatedTask.rider_id) {
         io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:new', updatedTask);
         io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
-        io.to(`riders:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id });
+        io.to(`riders:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id, task: updatedTask });
+        io.to(`admin:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id, task: updatedTask });
+        io.to(`pos_clients:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id, task: updatedTask });
 
         if (role === 'admin' && req.body.rider_id) {
           sendTaskNotification(updatedTask.rider_id, updatedTask).catch(err => console.error('Notification error:', err));
@@ -602,8 +614,15 @@ const syncOrderStatusWithTask = async (pool, restaurantId, orderNumber, taskStat
     }
 
     if (io && finalLicenseKey) {
+      const [orderRows] = await pool.query('SELECT * FROM _pos_orders_base WHERE restaurant_id = ? AND order_number = ?', [restaurantId, orderNumber]);
+      const updatedOrder = orderRows[0];
+      if (updatedOrder) {
+        io.to(`admin:${finalLicenseKey}`).emit('order:updated', updatedOrder);
+        io.to(`pos_clients:${finalLicenseKey}`).emit('order:updated', updatedOrder);
+      }
       io.to(`pos_clients:${finalLicenseKey}`).emit('pos:sync_required');
-      console.log(`[Sync Helper] Broadcasted pos:sync_required to pos_clients:${finalLicenseKey}`);
+      io.to(`admin:${finalLicenseKey}`).emit('pos:sync_required');
+      console.log(`[Sync Helper] Broadcasted order:updated and pos:sync_required to pos_clients:${finalLicenseKey} and admin:${finalLicenseKey}`);
     }
   } catch (err) {
     console.error('[Sync Helper] Error updating order status/rider:', err);
