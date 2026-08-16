@@ -677,7 +677,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
 
   if (clientTable === 'settings')                                           { matchCol = 'key';          matchVal = row.key; }
   else if (clientTable === 'staff' || clientTable === 'riders')             { matchCol = 'username';     matchVal = row.username; }
-  else if (['menu_categories', 'menu_items', 'deals', 'floors', 'inventory_items'].includes(clientTable)) { matchCol = 'name'; matchVal = row.name; }
+  else if (['menu_categories', 'menu_items', 'deals', 'floors', 'inventory_items', 'roles', 'permissions'].includes(clientTable)) { matchCol = 'name'; matchVal = row.name; }
   else if (clientTable === 'orders')                                        { matchCol = 'order_number'; matchVal = row.order_number; }
   else if (APPEND_ONLY.includes(clientTable))                               { matchCol = null;           matchVal = null; }
 
@@ -690,6 +690,14 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
       existing = await findOrderItemMatch(connection, cloudTable, row);
     } else if (clientTable === 'deal_items') {
       existing = await findDealItemMatch(connection, cloudTable, row);
+    } else if (clientTable === 'sections') {
+      existing = await findSectionMatch(connection, cloudTable, row);
+    } else if (clientTable === 'tables') {
+      existing = await findTableMatch(connection, cloudTable, row);
+    } else if (clientTable === 'role_permissions') {
+      existing = await findRolePermissionMatch(connection, cloudTable, row);
+    } else if (clientTable === 'customers') {
+      existing = await findCustomerMatch(connection, cloudTable, row);
     } else if (matchVal !== undefined && matchVal !== null) {
       const [[r]] = await connection.query(
         `SELECT * FROM \`${cloudTable}\` WHERE \`${matchCol}\` = ? AND restaurant_id = @current_restaurant_id LIMIT 1`, 
@@ -834,6 +842,17 @@ async function resolveNaturalKeys(conn, clientTable, row) {
       const [[t]] = await conn.query(q, p);
       if (t) row.table_id = t.id;
     }
+  } else if (clientTable === 'tables') {
+    if (row.section_name) {
+      let q = `SELECT id FROM _pos_sections_base WHERE restaurant_id = @current_restaurant_id AND name = ?`;
+      const p = [row.section_name];
+      if (row.floor_name) {
+        const [[fl]] = await conn.query(`SELECT id FROM _pos_floors_base WHERE restaurant_id = @current_restaurant_id AND name = ?`, [row.floor_name]);
+        if (fl) { q += ` AND floor_id = ?`; p.push(fl.id); }
+      }
+      const [[sec]] = await conn.query(q, p);
+      if (sec) row.section_id = sec.id;
+    }
   } else if (clientTable === 'inventory_log') {
     if (row.item_name) {
       const [[i]] = await conn.query(
@@ -853,7 +872,6 @@ async function resolveNaturalKeys(conn, clientTable, row) {
 }
 
 async function findAttendanceMatch(conn, cloudTable, row) {
-  // FIX (Bug #1): All queries use @current_restaurant_id session variable
   if (!row.clock_out && row.staff_id) {
     const [[r]] = await conn.query(
       `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND staff_id = ? AND clock_out IS NULL LIMIT 1`, 
@@ -917,6 +935,99 @@ async function findDealItemMatch(conn, cloudTable, row) {
   if (row.id) {
     const [[r]] = await conn.query(
       `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`, 
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findSectionMatch(conn, cloudTable, row) {
+  if (row.name && row.floor_id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND name = ? AND floor_id = ? LIMIT 1`,
+      [row.name, row.floor_id]
+    );
+    if (r) return r;
+  }
+  if (row.name) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND name = ? LIMIT 1`,
+      [row.name]
+    );
+    if (r) return r;
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`,
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findTableMatch(conn, cloudTable, row) {
+  if (row.number !== undefined && row.section_id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND number = ? AND section_id = ? LIMIT 1`,
+      [row.number, row.section_id]
+    );
+    if (r) return r;
+  }
+  if (row.number !== undefined) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND number = ? LIMIT 1`,
+      [row.number]
+    );
+    if (r) return r;
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`,
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findRolePermissionMatch(conn, cloudTable, row) {
+  if (row.role_id && row.permission_id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND role_id = ? AND permission_id = ? LIMIT 1`,
+      [row.role_id, row.permission_id]
+    );
+    if (r) return r;
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`,
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findCustomerMatch(conn, cloudTable, row) {
+  if (row.phone) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND phone = ? LIMIT 1`,
+      [row.phone]
+    );
+    if (r) return r;
+  }
+  if (row.name) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND name = ? LIMIT 1`,
+      [row.name]
+    );
+    if (r) return r;
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`,
       [row.id]
     );
     if (r) return r;
