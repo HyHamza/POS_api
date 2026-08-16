@@ -110,6 +110,8 @@ const fullExportData = async (req, res) => {
       'pos_customers',
       'pos_menu_categories',
       'pos_menu_items',
+      'pos_deals',
+      'pos_deal_items',
       'pos_floors',
       'pos_sections',
       'pos_tables',
@@ -192,6 +194,8 @@ function getBaseTable(table) {
     pos_attendance:           '_pos_attendance_base',
     pos_menu_categories:      '_pos_menu_categories_base',
     pos_menu_items:           '_pos_menu_items_base',
+    pos_deals:                '_pos_deals_base',
+    pos_deal_items:           '_pos_deal_items_base',
     pos_floors:               '_pos_floors_base',
     pos_sections:             '_pos_sections_base',
     pos_tables:               '_pos_tables_base',
@@ -229,11 +233,19 @@ async function fetchTableRows(table, cursor, limit, restaurantId) {
              LEFT JOIN _pos_menu_categories_base c ON t.category_id = c.id AND c.restaurant_id = t.restaurant_id
              WHERE t.restaurant_id = ?`;
     params.push(restaurantId);
+  } else if (table === 'pos_deal_items') {
+    query = `SELECT t.*, d.name AS deal_name, m.name AS menu_item_name 
+             FROM \`${base}\` t 
+             LEFT JOIN _pos_deals_base d ON t.deal_id = d.id AND d.restaurant_id = t.restaurant_id
+             LEFT JOIN _pos_menu_items_base m ON t.menu_item_id = m.id AND m.restaurant_id = t.restaurant_id
+             WHERE t.restaurant_id = ?`;
+    params.push(restaurantId);
   } else if (table === 'pos_order_items') {
-    query = `SELECT t.*, o.order_number, m.name AS menu_item_name 
+    query = `SELECT t.*, o.order_number, m.name AS menu_item_name, d.name AS deal_name 
              FROM \`${base}\` t 
              LEFT JOIN _pos_orders_base o ON t.order_id = o.id AND o.restaurant_id = t.restaurant_id
              LEFT JOIN _pos_menu_items_base m ON t.menu_item_id = m.id AND m.restaurant_id = t.restaurant_id
+             LEFT JOIN _pos_deals_base d ON t.deal_id = d.id AND d.restaurant_id = t.restaurant_id
              WHERE t.restaurant_id = ?`;
     params.push(restaurantId);
   } else if (table === 'pos_attendance' || table === 'pos_expenses' || table === 'pos_payroll') {
@@ -318,14 +330,14 @@ const exportData = async (req, res) => {
 
     let syncTables = [
       'pos_settings', 'pos_floors', 'pos_sections', 'pos_tables',
-      'pos_menu_categories', 'pos_menu_items', 'pos_staff', 'pos_attendance',
+      'pos_menu_categories', 'pos_menu_items', 'pos_deals', 'pos_deal_items', 'pos_staff', 'pos_attendance',
       'pos_orders', 'pos_order_items', 'pos_inventory_items', 'pos_inventory_log',
       'pos_expenses', 'pos_payroll', 'pos_activity_logs', 'pos_notifications',
       'riders', 'tasks', 'admins',
     ];
 
     if (role === 'Kitchen') {
-      syncTables = ['pos_settings', 'pos_menu_categories', 'pos_menu_items', 'pos_orders', 'pos_order_items', 'pos_notifications'];
+      syncTables = ['pos_settings', 'pos_menu_categories', 'pos_menu_items', 'pos_deals', 'pos_deal_items', 'pos_orders', 'pos_order_items', 'pos_notifications'];
     } else if (role === 'Rider') {
       syncTables = ['pos_settings', 'pos_orders', 'pos_order_items', 'riders', 'tasks', 'pos_notifications'];
     } else if (role === 'Waiter' || role === 'Cashier') {
@@ -393,6 +405,8 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
       settings:        '_pos_settings_base',
       menu_categories: '_pos_menu_categories_base',
       menu_items:      '_pos_menu_items_base',
+      deals:           '_pos_deals_base',
+      deal_items:      '_pos_deal_items_base',
       floors:          '_pos_floors_base',
       sections:        '_pos_sections_base',
       tables:          '_pos_tables_base',
@@ -413,13 +427,14 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
 
     const FIELD_LEVEL_TABLES = {
       _pos_menu_items_base:      ['price', 'description', 'is_available', 'category_id', 'cost_price', 'image_path', 'dietary_tags', 'variants'],
+      _pos_deals_base:           ['price', 'description', 'is_active', 'cost_price', 'image_path'],
       _pos_orders_base:          ['status', 'subtotal', 'total', 'notes', 'rider_name', 'payment_received', 'payment_received_at', 'payment_received_by', 'edit_count', 'is_return'],
       _pos_inventory_items_base: ['quantity', 'min_threshold', 'cost_per_unit'],
     };
 
     // V4 FIX: Deterministic table order (parents before children)
     const tableOrder = [
-      'settings', 'floors', 'sections', 'menu_categories', 'menu_items',
+      'settings', 'floors', 'sections', 'menu_categories', 'menu_items', 'deals', 'deal_items',
       'tables', 'staff', 'customers', 'admins', 'riders', 'attendance',
       'orders',        // CRITICAL: orders BEFORE items (FK dependency)
       'order_items',   // Items depend on orders
@@ -605,7 +620,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
 
   if (clientTable === 'settings')                                           { matchCol = 'key';          matchVal = row.key; }
   else if (clientTable === 'staff' || clientTable === 'riders')             { matchCol = 'username';     matchVal = row.username; }
-  else if (['menu_categories', 'menu_items', 'floors', 'inventory_items'].includes(clientTable)) { matchCol = 'name'; matchVal = row.name; }
+  else if (['menu_categories', 'menu_items', 'deals', 'floors', 'inventory_items'].includes(clientTable)) { matchCol = 'name'; matchVal = row.name; }
   else if (clientTable === 'orders')                                        { matchCol = 'order_number'; matchVal = row.order_number; }
   else if (APPEND_ONLY.includes(clientTable))                               { matchCol = null;           matchVal = null; }
 
@@ -616,6 +631,8 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
       existing = await findAttendanceMatch(connection, cloudTable, row);
     } else if (clientTable === 'order_items') {
       existing = await findOrderItemMatch(connection, cloudTable, row);
+    } else if (clientTable === 'deal_items') {
+      existing = await findDealItemMatch(connection, cloudTable, row);
     } else if (matchVal !== undefined && matchVal !== null) {
       // CRITICAL FIX (Bug #1): Add restaurant_id filter to ALL match queries
       const [[r]] = await connection.query(
@@ -670,7 +687,7 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
   return { processed: true, duplicate: false }; // Successfully processed
 }
 
-const IGNORED_COLS = ['category_name', 'floor_name', 'order_number', 'menu_item_name',
+const IGNORED_COLS = ['category_name', 'floor_name', 'order_number', 'menu_item_name', 'deal_name',
                       'staff_username', 'table_number', 'table_section_id', 'item_name',
                       'change_id', 'sync_device_id', 'txn_id', 'payment_staff_username', 'role_name'];
 
@@ -705,6 +722,21 @@ async function resolveNaturalKeys(conn, clientTable, row) {
       [row.category_name]
     );
     if (c) row.category_id = c.id;
+  } else if (clientTable === 'deal_items') {
+    if (row.deal_name) {
+      const [[d]] = await conn.query(
+        `SELECT id FROM _pos_deals_base WHERE restaurant_id = @current_restaurant_id AND name = ?`,
+        [row.deal_name]
+      );
+      if (d) row.deal_id = d.id;
+    }
+    if (row.menu_item_name) {
+      const [[m]] = await conn.query(
+        `SELECT id FROM _pos_menu_items_base WHERE restaurant_id = @current_restaurant_id AND name = ?`,
+        [row.menu_item_name]
+      );
+      if (m) row.menu_item_id = m.id;
+    }
   } else if (clientTable === 'order_items') {
     if (row.order_number !== undefined && row.order_number !== null) {
       const [[o]] = await conn.query(
@@ -719,6 +751,13 @@ async function resolveNaturalKeys(conn, clientTable, row) {
         [row.menu_item_name]
       );
       if (m) row.menu_item_id = m.id;
+    }
+    if (row.deal_name) {
+      const [[d]] = await conn.query(
+        `SELECT id FROM _pos_deals_base WHERE restaurant_id = @current_restaurant_id AND name = ?`,
+        [row.deal_name]
+      );
+      if (d) row.deal_id = d.id;
     }
   } else if (['attendance', 'expenses', 'payroll'].includes(clientTable) && row.staff_username) {
     const [[s]] = await conn.query(
@@ -808,6 +847,24 @@ async function findOrderItemMatch(conn, cloudTable, row) {
     }
     query += ` LIMIT 1`;
     const [[r]] = await conn.query(query, params);
+    if (r) return r;
+  }
+  if (row.id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE id = ? AND restaurant_id = @current_restaurant_id LIMIT 1`, 
+      [row.id]
+    );
+    if (r) return r;
+  }
+  return null;
+}
+
+async function findDealItemMatch(conn, cloudTable, row) {
+  if (row.deal_id && row.menu_item_id) {
+    const [[r]] = await conn.query(
+      `SELECT * FROM \`${cloudTable}\` WHERE restaurant_id = @current_restaurant_id AND deal_id = ? AND menu_item_id = ? LIMIT 1`,
+      [row.deal_id, row.menu_item_id]
+    );
     if (r) return r;
   }
   if (row.id) {

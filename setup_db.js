@@ -252,6 +252,42 @@ async function run() {
   `);
 
   await conn.query(`
+    CREATE TABLE IF NOT EXISTS _pos_deals_base (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id    INT          NOT NULL,
+      name             VARCHAR(255) NOT NULL,
+      description      TEXT,
+      price            DOUBLE       NOT NULL DEFAULT 0,
+      cost_price       DOUBLE       DEFAULT 0,
+      image_path       VARCHAR(255) DEFAULT NULL,
+      is_active        TINYINT      DEFAULT 1,
+      is_deleted       TINYINT      DEFAULT 0,
+      deleted_at       DATETIME     DEFAULT NULL,
+      created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_deal (restaurant_id, name),
+      FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS _pos_deal_items_base (
+      id               INT AUTO_INCREMENT PRIMARY KEY,
+      restaurant_id    INT          NOT NULL,
+      deal_id          INT          NOT NULL,
+      menu_item_id     INT          NOT NULL,
+      quantity         INT          NOT NULL DEFAULT 1,
+      is_deleted       TINYINT      DEFAULT 0,
+      deleted_at       DATETIME     DEFAULT NULL,
+      created_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE,
+      FOREIGN KEY (deal_id)       REFERENCES _pos_deals_base(id) ON DELETE CASCADE,
+      FOREIGN KEY (menu_item_id)  REFERENCES _pos_menu_items_base(id) ON DELETE CASCADE
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
     CREATE TABLE IF NOT EXISTS _pos_floors_base (
       id            INT AUTO_INCREMENT PRIMARY KEY,
       restaurant_id INT          NOT NULL,
@@ -544,7 +580,7 @@ async function run() {
   // Sync / HLC columns on all tables
   const syncTables = [
     '_admins_base', '_pos_settings_base', '_pos_staff_base', '_pos_attendance_base',
-    '_pos_menu_categories_base', '_pos_menu_items_base', '_pos_floors_base',
+    '_pos_menu_categories_base', '_pos_menu_items_base', '_pos_deals_base', '_pos_deal_items_base', '_pos_floors_base',
     '_pos_sections_base', '_pos_tables_base', '_pos_orders_base', '_pos_order_items_base',
     '_pos_inventory_items_base', '_pos_inventory_log_base', '_pos_expenses_base',
     '_pos_payroll_base', '_pos_activity_logs_base', '_pos_notifications_base',
@@ -566,6 +602,7 @@ async function run() {
   // Field-level HLC columns
   const fieldHlc = {
     _pos_menu_items_base:     ['price','description','is_available','category_id','cost_price','image_path','dietary_tags','variants'],
+    _pos_deals_base:          ['price','description','is_active','cost_price','image_path'],
     _pos_orders_base:         ['status','subtotal','total','notes','rider_name','edit_count','is_return'],
     _pos_inventory_items_base:['quantity','min_threshold','cost_per_unit'],
   };
@@ -577,16 +614,17 @@ async function run() {
   }
 
   // Extra one-off columns
-  await addCol('sync_events',      'change_id',          'VARCHAR(64) DEFAULT NULL');
-  await addCol('sync_events',      'device_id',          'VARCHAR(64) DEFAULT NULL');
-  await addCol('sync_events',      'table_name',         'VARCHAR(64) DEFAULT NULL');
-  await addCol('sync_events',      'row_id',             'INT DEFAULT NULL');
-  await addCol('sync_events',      'hlc',                'VARCHAR(128) DEFAULT NULL');
-  await addCol('sync_events',      'txn_id',             'VARCHAR(64) DEFAULT NULL');
-  await addCol('_tasks_base',      'order_number',       'VARCHAR(255) DEFAULT NULL');
-  await addCol('_pos_orders_base', 'rider_name',         'VARCHAR(255) DEFAULT NULL');
-  await addCol('_pos_orders_base', 'edit_count',         'INT DEFAULT 0');
-  await addCol('_pos_orders_base', 'is_return',          'TINYINT DEFAULT 0');
+  await addCol('sync_events',          'change_id',          'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',          'device_id',          'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',          'table_name',         'VARCHAR(64) DEFAULT NULL');
+  await addCol('sync_events',          'row_id',             'INT DEFAULT NULL');
+  await addCol('sync_events',          'hlc',                'VARCHAR(128) DEFAULT NULL');
+  await addCol('sync_events',          'txn_id',             'VARCHAR(64) DEFAULT NULL');
+  await addCol('_tasks_base',          'order_number',       'VARCHAR(255) DEFAULT NULL');
+  await addCol('_pos_orders_base',     'rider_name',         'VARCHAR(255) DEFAULT NULL');
+  await addCol('_pos_orders_base',     'edit_count',         'INT DEFAULT 0');
+  await addCol('_pos_orders_base',     'is_return',          'TINYINT DEFAULT 0');
+  await addCol('_pos_order_items_base','deal_id',            'INT DEFAULT NULL');
   await addCol('_pos_staff_base',  'permissions',        'TEXT DEFAULT NULL');
   await addCol('_pos_staff_base',  'role_id',            'INT DEFAULT NULL');
   await addCol('_pos_staff_base',  'attendance_pin_hash', 'VARCHAR(255) DEFAULT NULL');
@@ -611,6 +649,8 @@ async function run() {
     ['_pos_attendance_base',      'idx_attendance_hlc',  '`hlc`'],
     ['_pos_menu_categories_base', 'idx_menu_cats_hlc',   '`hlc`'],
     ['_pos_menu_items_base',      'idx_menu_items_hlc',  '`hlc`'],
+    ['_pos_deals_base',           'idx_deals_hlc',       '`hlc`'],
+    ['_pos_deal_items_base',      'idx_deal_items_hlc',  '`hlc`'],
     ['_pos_floors_base',          'idx_floors_hlc',      '`hlc`'],
     ['_pos_sections_base',        'idx_sections_hlc',    '`hlc`'],
     ['_pos_tables_base',          'idx_tables_hlc',      '`hlc`'],
@@ -656,6 +696,8 @@ async function run() {
     ['pos_attendance',        '_pos_attendance_base'],
     ['pos_menu_categories',   '_pos_menu_categories_base'],
     ['pos_menu_items',        '_pos_menu_items_base'],
+    ['pos_deals',             '_pos_deals_base'],
+    ['pos_deal_items',        '_pos_deal_items_base'],
     ['pos_floors',            '_pos_floors_base'],
     ['pos_sections',          '_pos_sections_base'],
     ['pos_tables',            '_pos_tables_base'],
@@ -694,6 +736,8 @@ async function run() {
     ['t_pos_attendance_insert',      '_pos_attendance_base'],
     ['t_pos_menu_categories_insert', '_pos_menu_categories_base'],
     ['t_pos_menu_items_insert',      '_pos_menu_items_base'],
+    ['t_pos_deals_insert',           '_pos_deals_base'],
+    ['t_pos_deal_items_insert',      '_pos_deal_items_base'],
     ['t_pos_floors_insert',          '_pos_floors_base'],
     ['t_pos_sections_insert',        '_pos_sections_base'],
     ['t_pos_tables_insert',          '_pos_tables_base'],

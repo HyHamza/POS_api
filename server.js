@@ -15,6 +15,7 @@ const authRoutes = require('./routes/authRoutes');
 const riderRoutes = require('./routes/riderRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const posRoutes = require('./routes/posRoutes');
+const dealRoutes = require('./routes/dealRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const appUpdateRoutes = require('./routes/appUpdateRoutes');
@@ -88,6 +89,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/riders', riderRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/pos', posRoutes);
+app.use('/api/deals', dealRoutes);
 app.use('/api/health', healthRoutes);
 
 // Database connection sanity test & auto schema generation on startup
