@@ -993,6 +993,166 @@ const riderClockOut = async (req, res) => {
   }
 };
 
+const getRiderAttendance = async (req, res) => {
+  const riderId = req.user.id;
+  const restaurantId = req.user.restaurantId;
+  const { month } = req.query; // e.g. "2026-08"
+
+  try {
+    const [riderRows] = await pool.query(
+      'SELECT id, username, full_name, restaurant_id FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+      [riderId, restaurantId]
+    );
+    if (riderRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Rider not found.' });
+    }
+    const rider = riderRows[0];
+
+    // Find staff record if exists
+    const [staffRows] = await pool.query(
+      'SELECT id, daily_duty_hours, salary_type, salary_amount FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?',
+      [rider.username, restaurantId]
+    );
+    const staffId = staffRows.length > 0 ? staffRows[0].id : null;
+
+    let query = `
+      SELECT a.id, a.restaurant_id, a.staff_id, a.date, a.clock_in, a.clock_out, a.verification_method
+      FROM _pos_attendance_base a
+      WHERE a.restaurant_id = ?
+        AND (a.is_deleted IS NULL OR a.is_deleted = 0)
+        AND (a.staff_id = ? OR a.staff_id = ? OR a.staff_id = ?)
+    `;
+    const params = [restaurantId, staffId || -1, riderId, rider.username];
+
+    if (month && month.length === 7) {
+      query += ` AND a.date LIKE ?`;
+      params.push(`${month}%`);
+    }
+
+    query += ` ORDER BY a.clock_in DESC, a.id DESC`;
+
+    const [attRows] = await pool.query(query, params);
+
+    return res.json({
+      success: true,
+      data: attRows,
+      error: null
+    });
+  } catch (error) {
+    console.error('Error fetching rider attendance:', error);
+    return res.status(500).json({ success: false, data: [], error: 'Failed to fetch attendance.' });
+  }
+};
+
+const getRiderSalary = async (req, res) => {
+  const riderId = req.user.id;
+  const restaurantId = req.user.restaurantId;
+  const { month } = req.query; // e.g. "2026-08"
+
+  try {
+    const [riderRows] = await pool.query(
+      'SELECT id, username, full_name, phone, restaurant_id FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+      [riderId, restaurantId]
+    );
+    if (riderRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Rider not found.' });
+    }
+    const rider = riderRows[0];
+
+    const [staffRows] = await pool.query(
+      'SELECT id, name, username, role, salary_type, salary_amount, daily_duty_hours, hire_date FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?',
+      [rider.username, restaurantId]
+    );
+    const staff = staffRows.length > 0 ? staffRows[0] : {
+      id: rider.id,
+      name: rider.full_name,
+      username: rider.username,
+      role: 'Rider',
+      salary_type: 'Monthly',
+      salary_amount: 0,
+      daily_duty_hours: 8
+    };
+
+    // Check payroll if available
+    let payroll = null;
+    if (staff.id) {
+      const [payrollRows] = await pool.query(
+        `SELECT * FROM _pos_payroll_base 
+         WHERE restaurant_id = ? AND (staff_id = ? OR staff_id = ?)
+         ${month ? 'AND period_start LIKE ?' : ''}
+         ORDER BY id DESC LIMIT 1`,
+        month ? [restaurantId, staff.id, riderId, `${month}%`] : [restaurantId, staff.id, riderId]
+      );
+      if (payrollRows.length > 0) {
+        payroll = payrollRows[0];
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        staff: {
+          id: staff.id,
+          name: staff.name || rider.full_name,
+          username: staff.username || rider.username,
+          role: staff.role || 'Rider',
+          salary_type: staff.salary_type || 'Monthly',
+          salary_amount: staff.salary_amount || 0,
+          daily_duty_hours: staff.daily_duty_hours || 8,
+          hire_date: staff.hire_date || null,
+        },
+        payroll: payroll
+      },
+      error: null
+    });
+  } catch (error) {
+    console.error('Error fetching rider salary:', error);
+    return res.status(500).json({ success: false, data: null, error: 'Failed to fetch salary.' });
+  }
+};
+
+const getRiderProfile = async (req, res) => {
+  const riderId = req.user.id;
+  const restaurantId = req.user.restaurantId;
+
+  try {
+    const [riderRows] = await pool.query(
+      'SELECT id, username, full_name, phone, status, is_active, created_at FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+      [riderId, restaurantId]
+    );
+    if (riderRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Rider not found.' });
+    }
+    const rider = riderRows[0];
+
+    const [staffRows] = await pool.query(
+      'SELECT id, name, username, role, salary_type, salary_amount, daily_duty_hours, hire_date FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?',
+      [rider.username, restaurantId]
+    );
+    const staff = staffRows.length > 0 ? staffRows[0] : null;
+
+    return res.json({
+      success: true,
+      data: {
+        id: rider.id,
+        name: rider.full_name,
+        username: rider.username,
+        phone: rider.phone,
+        role: 'Rider',
+        status: rider.status,
+        salary_type: staff?.salary_type || 'Monthly',
+        salary_amount: staff?.salary_amount || 0,
+        daily_duty_hours: staff?.daily_duty_hours || 8,
+        hire_date: staff?.hire_date || rider.created_at,
+      },
+      error: null
+    });
+  } catch (error) {
+    console.error('Error fetching rider profile:', error);
+    return res.status(500).json({ success: false, data: null, error: 'Failed to fetch profile.' });
+  }
+};
+
 module.exports = {
   riderLogin,
   adminLogin,
@@ -1003,6 +1163,9 @@ module.exports = {
   getRiderDutyStatus,
   riderClockIn,
   riderClockOut,
+  getRiderAttendance,
+  getRiderSalary,
+  getRiderProfile,
   verifyLicense,
   isRiderDutyActive
 };

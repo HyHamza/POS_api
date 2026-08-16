@@ -13,6 +13,9 @@ router.post('/rider/logout', authenticateJWT, requireRider, authController.rider
 router.get('/rider/duty-status', authenticateJWT, requireRider, authController.getRiderDutyStatus);
 router.post('/rider/clock-in', authenticateJWT, requireRider, authController.riderClockIn);
 router.post('/rider/clock-out', authenticateJWT, requireRider, authController.riderClockOut);
+router.get('/rider/attendance', authenticateJWT, requireRider, authController.getRiderAttendance);
+router.get('/rider/salary', authenticateJWT, requireRider, authController.getRiderSalary);
+router.get('/rider/profile', authenticateJWT, requireRider, authController.getRiderProfile);
 router.get('/verify-license', authController.verifyLicense);
 
 module.exports = router;
