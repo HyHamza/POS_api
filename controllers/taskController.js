@@ -540,6 +540,47 @@ const updateTaskStatus = async (req, res) => {
   }
 };
 
+const updateTaskByOrderNumber = async (req, res) => {
+  const { orderNumber } = req.params;
+
+  try {
+    const { asyncLocalStorage } = require('../config/db');
+    const store = asyncLocalStorage.getStore();
+    const restaurantId = store?.restaurantId || req.user.restaurantId;
+
+    if (!restaurantId) {
+      return res.status(400).json({
+        success: false,
+        data: null,
+        error: 'Restaurant context not found.'
+      });
+    }
+
+    const [rows] = await pool.query(
+      'SELECT id FROM _tasks_base WHERE order_number = ? AND restaurant_id = ? ORDER BY id DESC LIMIT 1',
+      [orderNumber, restaurantId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(404).json({
+        success: false,
+        data: null,
+        error: `No task found for order #${orderNumber}`
+      });
+    }
+
+    req.params.id = rows[0].id;
+    return updateTaskStatus(req, res);
+  } catch (error) {
+    console.error('Error updating task by order number:', error);
+    return res.status(500).json({
+      success: false,
+      data: null,
+      error: 'An internal server error occurred.'
+    });
+  }
+};
+
 const getMyRiderStats = async (req, res) => {
   const riderId = req.user.id;
   const restaurantId = req.user.restaurantId; // Should be in JWT payload
