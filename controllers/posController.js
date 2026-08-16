@@ -375,6 +375,24 @@ const exportData = async (req, res) => {
   }
 };
 
+// Helper to check for transient MySQL lock wait timeouts or deadlocks
+const isLockTimeoutOrDeadlock = (err) => {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  const code = err.code || '';
+  const errno = err.errno || 0;
+  return (
+    code === 'ER_LOCK_WAIT_TIMEOUT' ||
+    code === 'ER_LOCK_DEADLOCK' ||
+    errno === 1205 ||
+    errno === 1213 ||
+    msg.includes('lock wait timeout exceeded') ||
+    msg.includes('deadlock found when trying to get lock')
+  );
+};
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 // ─── Core import/merge with idempotent sync_device_id upserts ────────────────
 /**
  * Merges an incoming sync payload into MySQL.
@@ -394,6 +412,8 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
 
   const importErrors = [];
   const connection = await pool.getConnection();
+  const pendingTaskSyncs = [];
+
   try {
     if (restaurantId !== null && restaurantId !== undefined) {
       await connection.query('SET @current_restaurant_id = ?', [restaurantId]);
@@ -433,7 +453,7 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
       _pos_inventory_items_base: ['quantity', 'min_threshold', 'cost_per_unit'],
     };
 
-    // V4 FIX: Deterministic table order (parents before children)
+    // Deterministic table order (parents before children)
     const tableOrder = [
       'settings', 'floors', 'sections', 'menu_categories', 'menu_items', 'deals', 'deal_items',
       'tables', 'staff', 'customers', 'admins', 'riders', 'attendance',
@@ -443,7 +463,6 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
       'activity_logs', 'notifications', 'tasks',
     ];
 
-    // V4 FIX: Group all rows by txn_id for atomic processing
     const txnGroups = new Map(); // txn_id -> [{clientTable, cloudTable, row}]
     const noTxnRows = []; // Rows without txn_id (legacy)
     
@@ -470,80 +489,100 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
     let totalChangesCount = 0;
     const syncedChangeIds = [];
 
-    // V4 FIX: Process each transaction atomically (all-or-nothing)
+    // Process each transaction atomically with retry logic for lock timeouts
     for (const [txnId, txnRows] of txnGroups.entries()) {
       logger.info(`Processing transaction ${txnId} with ${txnRows.length} rows`);
       
-      await connection.beginTransaction();
-      
-      try {
-        let txnChangesCount = 0;
-        
-        for (const { clientTable, cloudTable, row } of txnRows) {
-          const result = await processRow(
-            connection, clientTable, cloudTable, row, senderClientId, 
-            restaurantId, FIELD_LEVEL_TABLES, importErrors
-          );
+      let attempts = 0;
+      let txnCommitted = false;
+
+      while (attempts < 3 && !txnCommitted) {
+        attempts++;
+        try {
+          await connection.beginTransaction();
+          let txnChangesCount = 0;
           
-          if (result.processed) {
-            txnChangesCount++;
+          for (const { clientTable, cloudTable, row } of txnRows) {
+            const result = await processRow(
+              connection, clientTable, cloudTable, row, senderClientId, 
+              restaurantId, FIELD_LEVEL_TABLES, importErrors, pendingTaskSyncs
+            );
+            
+            if (result.processed) {
+              txnChangesCount++;
+            }
+            if (result.processed || result.duplicate) {
+              const changeId = row.change_id || row._change_id;
+              if (changeId) syncedChangeIds.push(changeId);
+            }
           }
-          if (result.processed || result.duplicate) {
-            const changeId = row.change_id || row._change_id;
-            if (changeId) syncedChangeIds.push(changeId);
+          
+          await connection.commit();
+          totalChangesCount += txnChangesCount;
+          txnCommitted = true;
+          logger.success(`Transaction ${txnId} committed successfully (${txnChangesCount} changes)`);
+        } catch (txnErr) {
+          await connection.rollback().catch(() => {});
+          if (isLockTimeoutOrDeadlock(txnErr) && attempts < 3) {
+            const backoff = 60 * Math.pow(2, attempts) + Math.random() * 40;
+            logger.warn(`Transient lock timeout on transaction ${txnId} (attempt ${attempts}), retrying in ${Math.round(backoff)}ms...`);
+            await delay(backoff);
+          } else {
+            logger.error(`Transaction ${txnId} rolled back: ${txnErr.message}`);
+            importErrors.push(`Transaction ${txnId}: ${txnErr.message}`);
+            break;
           }
         }
-        
-        // Commit entire transaction atomically
-        await connection.commit();
-        totalChangesCount += txnChangesCount;
-        logger.success(`Transaction ${txnId} committed successfully (${txnChangesCount} changes)`);
-        
-      } catch (txnErr) {
-        await connection.rollback();
-        logger.error(`Transaction ${txnId} rolled back: ${txnErr.message}`);
-        importErrors.push(`Transaction ${txnId}: ${txnErr.message}`);
       }
     }
 
-    // Process non-transactional rows (legacy compatibility)
+    // Process non-transactional rows in optimized, short-lived chunks (15 rows max per transaction)
     if (noTxnRows.length > 0) {
-      logger.info(`Processing ${noTxnRows.length} non-transactional rows`);
+      logger.info(`Processing ${noTxnRows.length} non-transactional rows in fast chunked transactions`);
       
-      await connection.beginTransaction();
-      
-      try {
-        for (const { clientTable, cloudTable, row } of noTxnRows) {
-          const result = await processRow(
-            connection, clientTable, cloudTable, row, senderClientId,
-            restaurantId, FIELD_LEVEL_TABLES, importErrors
-          );
-          
-          if (result.processed) {
-            totalChangesCount++;
-          }
-          if (result.processed || result.duplicate) {
-            const changeId = row.change_id || row._change_id;
-            if (changeId) syncedChangeIds.push(changeId);
+      const CHUNK_SIZE = 15;
+      for (let i = 0; i < noTxnRows.length; i += CHUNK_SIZE) {
+        const chunk = noTxnRows.slice(i, i + CHUNK_SIZE);
+        let attempts = 0;
+        let chunkCommitted = false;
+
+        while (attempts < 3 && !chunkCommitted) {
+          attempts++;
+          try {
+            await connection.beginTransaction();
+            let chunkChangesCount = 0;
+
+            for (const { clientTable, cloudTable, row } of chunk) {
+              const result = await processRow(
+                connection, clientTable, cloudTable, row, senderClientId,
+                restaurantId, FIELD_LEVEL_TABLES, importErrors, pendingTaskSyncs
+              );
+              
+              if (result.processed) {
+                chunkChangesCount++;
+              }
+              if (result.processed || result.duplicate) {
+                const changeId = row.change_id || row._change_id;
+                if (changeId) syncedChangeIds.push(changeId);
+              }
+            }
+            
+            await connection.commit();
+            totalChangesCount += chunkChangesCount;
+            chunkCommitted = true;
+          } catch (err) {
+            await connection.rollback().catch(() => {});
+            if (isLockTimeoutOrDeadlock(err) && attempts < 3) {
+              const backoff = 60 * Math.pow(2, attempts) + Math.random() * 40;
+              logger.warn(`Transient lock timeout on non-transactional batch (attempt ${attempts}), retrying in ${Math.round(backoff)}ms...`);
+              await delay(backoff);
+            } else {
+              logger.error(`Non-transactional batch rolled back: ${err.message}`);
+              importErrors.push(`Non-transactional: ${err.message}`);
+              break;
+            }
           }
         }
-        
-        await connection.commit();
-        logger.success(`Non-transactional rows committed successfully (${noTxnRows.length} rows processed, ${totalChangesCount} changes saved)`);
-        
-        // Verify commit succeeded by checking connection state
-        const [[txnState]] = await connection.query('SELECT @@in_transaction as in_txn');
-        if (txnState.in_txn) {
-          logger.error(`WARNING: Still in transaction after commit! Rolling back.`);
-          await connection.rollback();
-        } else {
-          logger.debug(`Transaction state verified: not in transaction after commit`);
-        }
-        
-      } catch (err) {
-        await connection.rollback();
-        logger.error(`Non-transactional rows rolled back: ${err.message}`);
-        importErrors.push(`Non-transactional: ${err.message}`);
       }
     }
 
@@ -563,6 +602,23 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
     return { success: false, processed: 0, error: err.message };
   } finally {
     connection.release();
+
+    // Post-commit: Decoupled task synchronization (avoids cross-table lock contention)
+    if (pendingTaskSyncs.length > 0 && (restaurantId !== null && restaurantId !== undefined)) {
+      setImmediate(async () => {
+        try {
+          const { syncTaskWithOrderStatus } = require('./taskController');
+          const io = global.socketIoInstance;
+          for (const item of pendingTaskSyncs) {
+            try {
+              await syncTaskWithOrderStatus(pool, restaurantId, item.orderNumber, item.status, null, io);
+            } catch (e) {
+              console.warn(`[Task Sync Post-Commit] Error syncing order ${item.orderNumber}:`, e.message);
+            }
+          }
+        } catch (_) {}
+      });
+    }
   }
 };
 
@@ -572,7 +628,7 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
  * Process a single row (idempotency check + insert/update + sync event registration)
  * Returns true if processed, false if skipped
  */
-async function processRow(connection, clientTable, cloudTable, row, senderClientId, restaurantId, FIELD_LEVEL_TABLES, importErrors) {
+async function processRow(connection, clientTable, cloudTable, row, senderClientId, restaurantId, FIELD_LEVEL_TABLES, importErrors, pendingTaskSyncs) {
   // ── Idempotency gate with change_id deduplication ──────────────
   const syncId = row.sync_device_id || row._sync_device_id;
   const changeId = row.change_id || row._change_id;
@@ -635,7 +691,6 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
     } else if (clientTable === 'deal_items') {
       existing = await findDealItemMatch(connection, cloudTable, row);
     } else if (matchVal !== undefined && matchVal !== null) {
-      // CRITICAL FIX (Bug #1): Add restaurant_id filter to ALL match queries
       const [[r]] = await connection.query(
         `SELECT * FROM \`${cloudTable}\` WHERE \`${matchCol}\` = ? AND restaurant_id = @current_restaurant_id LIMIT 1`, 
         [matchVal]
@@ -654,38 +709,29 @@ async function processRow(connection, clientTable, cloudTable, row, senderClient
     await doUpdate(connection, cloudTable, clientTable, existing, row, incomingHlc, senderClientId, FIELD_LEVEL_TABLES, importErrors);
   }
 
-  // ── Sync linked Rider Task status when order status changes ────────
+  // ── Queue linked Rider Task status for post-commit execution ──────
   if (clientTable === 'orders' && row.order_number && row.status) {
-    try {
-      const { syncTaskWithOrderStatus } = require('./taskController');
-      const io = global.socketIoInstance;
-      await syncTaskWithOrderStatus(connection, restaurantId, row.order_number, row.status, null, io);
-    } catch (_) {}
+    if (pendingTaskSyncs && Array.isArray(pendingTaskSyncs)) {
+      pendingTaskSyncs.push({ orderNumber: row.order_number, status: row.status });
+    }
   }
 
   // ── Register event as processed ───────────────────────────────────
   if (restaurantId !== null && restaurantId !== undefined) {
-    // V4 FIX: Store change_id, sync_device_id, AND txn_id
     if (changeId && syncId) {
-      logger.success(`Registering sync_event: changeId=${changeId}, syncId=${syncId}, txnId=${txnId}`);
       await connection.query(
         'INSERT IGNORE INTO sync_events (change_id, sync_device_id, txn_id, restaurant_id, device_id, table_name, row_id, hlc) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
         [changeId, syncId, txnId, restaurantId, senderClientId, clientTable, row.id, incomingHlc]
       );
     } else if (syncId) {
-      logger.success(`Registering sync_event (no changeId): syncId=${syncId}, txnId=${txnId}`);
       await connection.query(
         'INSERT IGNORE INTO sync_events (sync_device_id, txn_id, restaurant_id, device_id, table_name, row_id, hlc) VALUES (?, ?, ?, ?, ?, ?, ?)',
         [syncId, txnId, restaurantId, senderClientId, clientTable, row.id, incomingHlc]
       );
-    } else {
-      logger.error(`Cannot register sync_event - missing both changeId and syncId!`);
     }
-  } else {
-    logger.error(`Cannot register sync_event - restaurantId is null/undefined!`);
   }
 
-  return { processed: true, duplicate: false }; // Successfully processed
+  return { processed: true, duplicate: false };
 }
 
 const IGNORED_COLS = ['category_name', 'floor_name', 'order_number', 'menu_item_name', 'deal_name',
@@ -889,48 +935,15 @@ async function doInsert(conn, cloudTable, clientTable, row, hlc, deviceId, error
     cols.push('`origin_device_id`');vals.push(row._origin_device_id || deviceId); ph.push('?');
   }
   if (cols.length === 0) {
-    logger.warn(`No columns to insert for ${clientTable} - all columns were filtered out`);
     return;
   }
   
-  // CRITICAL: Check if @current_restaurant_id is set
-  const [[sessionVar]] = await conn.query('SELECT @current_restaurant_id as rid');
-  logger.debug(`Session variable @current_restaurant_id = ${sessionVar.rid}`);
-  
   const sql = `INSERT IGNORE INTO \`${cloudTable}\` (${cols.join(',')}) VALUES (${ph.join(',')})`;
-  logger.info(`Inserting into ${cloudTable}: ${row.name || 'unnamed'}`);
-  logger.debug(`SQL: ${sql}`);
-  logger.debug(`Columns: ${cols.join(', ')}`);
-  logger.debug(`Values: ${JSON.stringify(vals)}`);
   
   try {
-    const [result] = await conn.query(sql, vals);
-    logger.success(`Inserted ${result.affectedRows} row(s) into ${cloudTable} (insertId: ${result.insertId})`);
-    
-    // DIAGNOSTIC: Immediately check if row exists with the insertId
-    if (result.insertId && result.affectedRows > 0) {
-      try {
-        const [[verifyRow]] = await conn.query(
-          `SELECT id, restaurant_id FROM \`${cloudTable}\` WHERE id = ?`,
-          [result.insertId]
-        );
-        
-        if (verifyRow) {
-          logger.success(`✅ VERIFIED: Row ${result.insertId} exists with restaurant_id=${verifyRow.restaurant_id}`);
-        } else {
-          logger.error(`❌ CRITICAL: Row ${result.insertId} NOT FOUND immediately after INSERT!`);
-        }
-      } catch (verifyErr) {
-        // Verification failed, but insert may have succeeded - don't treat as fatal
-        logger.debug(`Verification query failed: ${verifyErr.message}`);
-      }
-    } else if (result.affectedRows === 0) {
-      logger.warn(`INSERT IGNORE had 0 affected rows - likely duplicate key`);
-    }
+    await conn.query(sql, vals);
   } catch (e) {
     logger.error(`Insert ${clientTable} failed: ${e.message}`);
-    logger.debug(`SQL: ${sql}`);
-    logger.debug(`Values: ${JSON.stringify(vals)}`);
     errors.push(`Insert ${clientTable}: ${e.message}`);
   }
 }

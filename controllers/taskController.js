@@ -570,215 +570,166 @@ const getMyRiderStats = async (req, res) => {
   }
 };
 
-const syncOrderStatusWithTask = async (pool, restaurantId, orderNumber, taskStatus, licenseKey, io) => {
-  if (!orderNumber) return;
-  try {
-    // 1. Fetch the task to get the current rider_id
-    const [taskRows] = await pool.query('SELECT rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ?', [restaurantId, orderNumber]);
-    let riderName = null;
-    if (taskRows.length > 0 && taskRows[0].rider_id) {
-      const [riderRows] = await pool.query('SELECT full_name FROM _riders_base WHERE restaurant_id = ? AND id = ?', [restaurantId, taskRows[0].rider_id]);
-      if (riderRows.length > 0) {
-        riderName = riderRows[0].full_name;
+const isLockTimeoutOrDeadlock = (err) => {
+  if (!err) return false;
+  const msg = (err.message || '').toLowerCase();
+  const code = err.code || '';
+  const errno = err.errno || 0;
+  return (
+    code === 'ER_LOCK_WAIT_TIMEOUT' ||
+    code === 'ER_LOCK_DEADLOCK' ||
+    errno === 1205 ||
+    errno === 1213 ||
+    msg.includes('lock wait timeout exceeded') ||
+    msg.includes('deadlock found when trying to get lock')
+  );
+};
+
+const delay = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
+const syncOrderStatusWithTask = async (dbPool, restaurantId, orderNumber, taskStatus, licenseKey, io) => {
+  if (!orderNumber || !restaurantId) return;
+  
+  let attempts = 0;
+  while (attempts < 3) {
+    attempts++;
+    try {
+      // 1. Fetch the task to get the current rider_id
+      const [taskRows] = await dbPool.query('SELECT rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1', [restaurantId, orderNumber]);
+      let riderName = null;
+      if (taskRows.length > 0 && taskRows[0].rider_id) {
+        const [riderRows] = await dbPool.query('SELECT full_name FROM _riders_base WHERE restaurant_id = ? AND id = ? LIMIT 1', [restaurantId, taskRows[0].rider_id]);
+        if (riderRows.length > 0) {
+          riderName = riderRows[0].full_name;
+        }
+      }
+
+      let orderStatus = null;
+      if (taskStatus === 'delivering') {
+        orderStatus = 'delivering';
+      } else if (taskStatus === 'delivered') {
+        orderStatus = 'completed';
+      } else if (taskStatus === 'cancelled') {
+        orderStatus = 'cancelled';
+      }
+
+      // 2. Prepare and execute update query
+      let updateQuery = 'UPDATE _pos_orders_base SET rider_name = ?, updated_at = NOW()';
+      const params = [riderName];
+      if (orderStatus) {
+        updateQuery += ', status = ?';
+        params.push(orderStatus);
+      }
+      updateQuery += ' WHERE restaurant_id = ? AND order_number = ?';
+      params.push(restaurantId, orderNumber);
+
+      await dbPool.query(updateQuery, params);
+      
+      let finalLicenseKey = licenseKey;
+      if (!finalLicenseKey && restaurantId) {
+        const [restRows] = await dbPool.query('SELECT license_key FROM restaurants WHERE id = ? LIMIT 1', [restaurantId]);
+        if (restRows.length > 0) {
+          finalLicenseKey = restRows[0].license_key;
+        }
+      }
+
+      if (io && finalLicenseKey) {
+        const [orderRows] = await dbPool.query('SELECT * FROM _pos_orders_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1', [restaurantId, orderNumber]);
+        const updatedOrder = orderRows[0];
+        if (updatedOrder) {
+          io.to(`admin:${finalLicenseKey}`).emit('order:updated', updatedOrder);
+          io.to(`pos_clients:${finalLicenseKey}`).emit('order:updated', updatedOrder);
+        }
+        io.to(`pos_clients:${finalLicenseKey}`).emit('pos:sync_required');
+        io.to(`admin:${finalLicenseKey}`).emit('pos:sync_required');
+      }
+      break; // Success
+    } catch (err) {
+      if (isLockTimeoutOrDeadlock(err) && attempts < 3) {
+        const backoff = 50 * Math.pow(2, attempts) + Math.random() * 40;
+        await delay(backoff);
+      } else {
+        console.error('[Sync Helper] Error updating order status/rider:', err.message);
+        break;
       }
     }
-
-    let orderStatus = null;
-    if (taskStatus === 'delivering') {
-      orderStatus = 'delivering';
-    } else if (taskStatus === 'delivered') {
-      orderStatus = 'completed';
-    } else if (taskStatus === 'cancelled') {
-      orderStatus = 'cancelled';
-    }
-
-    // 2. Prepare and execute update query
-    let updateQuery = 'UPDATE _pos_orders_base SET rider_name = ?, updated_at = NOW()';
-    const params = [riderName];
-    if (orderStatus) {
-      updateQuery += ', status = ?';
-      params.push(orderStatus);
-    }
-    updateQuery += ' WHERE restaurant_id = ? AND order_number = ?';
-    params.push(restaurantId, orderNumber);
-
-    await pool.query(updateQuery, params);
-    console.log(`[Sync Helper] Updated order ${orderNumber}: status = ${orderStatus || 'unchanged'}, rider_name = ${riderName}`);
-    
-    let finalLicenseKey = licenseKey;
-    if (!finalLicenseKey && restaurantId) {
-      const [restRows] = await pool.query('SELECT license_key FROM restaurants WHERE id = ?', [restaurantId]);
-      if (restRows.length > 0) {
-        finalLicenseKey = restRows[0].license_key;
-      }
-    }
-
-    if (io && finalLicenseKey) {
-      const [orderRows] = await pool.query('SELECT * FROM _pos_orders_base WHERE restaurant_id = ? AND order_number = ?', [restaurantId, orderNumber]);
-      const updatedOrder = orderRows[0];
-      if (updatedOrder) {
-        io.to(`admin:${finalLicenseKey}`).emit('order:updated', updatedOrder);
-        io.to(`pos_clients:${finalLicenseKey}`).emit('order:updated', updatedOrder);
-      }
-      io.to(`pos_clients:${finalLicenseKey}`).emit('pos:sync_required');
-      io.to(`admin:${finalLicenseKey}`).emit('pos:sync_required');
-      console.log(`[Sync Helper] Broadcasted order:updated and pos:sync_required to pos_clients:${finalLicenseKey} and admin:${finalLicenseKey}`);
-    }
-  } catch (err) {
-    console.error('[Sync Helper] Error updating order status/rider:', err);
   }
 };
 
-const updateTaskByOrderNumber = async (req, res) => {
-  const { orderNumber } = req.params;
-  const { status, rider_id } = req.body;
+const syncTaskWithOrderStatus = async (dbPool, restaurantId, orderNumber, orderStatus, licenseKey, io) => {
+  if (!orderNumber || !orderStatus || !restaurantId) return;
 
-  try {
-    const { asyncLocalStorage } = require('../config/db');
-    const store = asyncLocalStorage.getStore();
-    const restaurantId = store?.restaurantId || req.user?.restaurantId;
-
-    if (!restaurantId) {
-      return res.status(400).json({
-        success: false,
-        data: null,
-        error: 'Restaurant context not found.'
-      });
-    }
-
-    const [taskRows] = await pool.query(
-      'SELECT * FROM _tasks_base WHERE order_number = ? AND restaurant_id = ? LIMIT 1',
-      [orderNumber, restaurantId]
-    );
-
-    if (taskRows.length === 0) {
-      return res.status(404).json({
-        success: false,
-        data: null,
-        error: 'Task not found for this order number.'
-      });
-    }
-
-    const task = taskRows[0];
-    let updateQuery = 'UPDATE _tasks_base SET status = ?';
-    const params = [status];
-
-    if (rider_id !== undefined) {
-      updateQuery += ', rider_id = ?';
-      params.push(rider_id || null);
-      if (rider_id) {
-        updateQuery += ', assigned_at = NOW()';
-      }
-    }
-
-    if (status === 'accepted') {
-      updateQuery += ', accepted_at = NOW()';
-    } else if (status === 'delivered') {
-      updateQuery += ', delivered_at = NOW()';
-    }
-
-    updateQuery += ' WHERE id = ? AND restaurant_id = ?';
-    params.push(task.id, restaurantId);
-
-    await pool.query(updateQuery, params);
-
-    const [updatedRows] = await pool.query(
-      `SELECT t.*, r.full_name as rider_name 
-       FROM _tasks_base t 
-       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
-       WHERE t.id = ? AND t.restaurant_id = ?`,
-      [task.id, restaurantId]
-    );
-    const updatedTask = updatedRows[0];
-
-    const io = req.app.get('io');
-    const licenseKey = req.headers['x-license-key'] || req.query.license_key;
-    if (io && licenseKey) {
-      io.to(`admin:${licenseKey}`).emit('task:status:update', updatedTask);
-      io.to(`riders:${licenseKey}`).emit('task:updated', updatedTask);
-      if (updatedTask && updatedTask.rider_id) {
-        io.to(`rider:${licenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
-      }
-    }
-
-    return res.json({
-      success: true,
-      data: updatedTask,
-      error: null
-    });
-  } catch (error) {
-    console.error('Error updating task by order number:', error);
-    return res.status(500).json({
-      success: false,
-      data: null,
-      error: 'An internal server error occurred.'
-    });
+  let taskStatus = null;
+  const lower = orderStatus.toLowerCase();
+  if (lower === 'ready_for_dispatch' || lower === 'prepared' || lower === 'ready') {
+    taskStatus = 'prepared';
+  } else if (lower === 'delivering' || lower === 'dispatched') {
+    taskStatus = 'dispatched';
+  } else if (lower === 'completed') {
+    taskStatus = 'delivered';
+  } else if (lower === 'cancelled') {
+    taskStatus = 'cancelled';
   }
-};
 
-const syncTaskWithOrderStatus = async (pool, restaurantId, orderNumber, orderStatus, licenseKey, io) => {
-  if (!orderNumber || !orderStatus) return;
-  try {
-    let taskStatus = null;
-    const lower = orderStatus.toLowerCase();
-    if (lower === 'ready_for_dispatch' || lower === 'prepared' || lower === 'ready') {
-      taskStatus = 'prepared';
-    } else if (lower === 'delivering' || lower === 'dispatched') {
-      taskStatus = 'dispatched';
-    } else if (lower === 'completed') {
-      taskStatus = 'delivered';
-    } else if (lower === 'cancelled') {
-      taskStatus = 'cancelled';
-    }
+  if (!taskStatus) return;
 
-    if (!taskStatus) return;
+  let attempts = 0;
+  while (attempts < 3) {
+    attempts++;
+    try {
+      const [taskRows] = await dbPool.query(
+        'SELECT id, status, rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1',
+        [restaurantId, orderNumber]
+      );
 
-    const [taskRows] = await pool.query(
-      'SELECT id, status, rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1',
-      [restaurantId, orderNumber]
-    );
+      if (taskRows.length === 0) return;
+      const currentTask = taskRows[0];
 
-    if (taskRows.length === 0) return;
-    const currentTask = taskRows[0];
+      // Avoid regressing state if already delivering/delivered
+      if (currentTask.status === 'delivering' && taskStatus === 'dispatched') {
+        return;
+      }
+      if (currentTask.status === 'delivered' && taskStatus !== 'delivered') {
+        return;
+      }
 
-    // Avoid regressing state if already delivering/delivered
-    if (currentTask.status === 'delivering' && taskStatus === 'dispatched') {
-      return;
-    }
-    if (currentTask.status === 'delivered' && taskStatus !== 'delivered') {
-      return;
-    }
+      await dbPool.query(
+        'UPDATE _tasks_base SET status = ? WHERE id = ? AND restaurant_id = ?',
+        [taskStatus, currentTask.id, restaurantId]
+      );
 
-    await pool.query(
-      'UPDATE _tasks_base SET status = ? WHERE id = ? AND restaurant_id = ?',
-      [taskStatus, currentTask.id, restaurantId]
-    );
+      const [updatedRows] = await dbPool.query(
+        `SELECT t.*, r.full_name as rider_name 
+         FROM _tasks_base t 
+         LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
+         WHERE t.id = ? AND t.restaurant_id = ? LIMIT 1`,
+        [currentTask.id, restaurantId]
+      );
+      const updatedTask = updatedRows[0];
 
-    const [updatedRows] = await pool.query(
-      `SELECT t.*, r.full_name as rider_name 
-       FROM _tasks_base t 
-       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
-       WHERE t.id = ? AND t.restaurant_id = ?`,
-      [currentTask.id, restaurantId]
-    );
-    const updatedTask = updatedRows[0];
+      let finalLicenseKey = licenseKey;
+      if (!finalLicenseKey && restaurantId) {
+        const [restRows] = await dbPool.query('SELECT license_key FROM restaurants WHERE id = ? LIMIT 1', [restaurantId]);
+        if (restRows.length > 0) finalLicenseKey = restRows[0].license_key;
+      }
 
-    let finalLicenseKey = licenseKey;
-    if (!finalLicenseKey && restaurantId) {
-      const [restRows] = await pool.query('SELECT license_key FROM restaurants WHERE id = ?', [restaurantId]);
-      if (restRows.length > 0) finalLicenseKey = restRows[0].license_key;
-    }
-
-    if (io && finalLicenseKey && updatedTask) {
-      io.to(`admin:${finalLicenseKey}`).emit('task:status:update', updatedTask);
-      io.to(`riders:${finalLicenseKey}`).emit('task:updated', updatedTask);
-      if (updatedTask.rider_id) {
-        io.to(`rider:${finalLicenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+      if (io && finalLicenseKey && updatedTask) {
+        io.to(`admin:${finalLicenseKey}`).emit('task:status:update', updatedTask);
+        io.to(`riders:${finalLicenseKey}`).emit('task:updated', updatedTask);
+        if (updatedTask.rider_id) {
+          io.to(`rider:${finalLicenseKey}:${updatedTask.rider_id}`).emit('task:updated', updatedTask);
+        }
+      }
+      break; // Success
+    } catch (err) {
+      if (isLockTimeoutOrDeadlock(err) && attempts < 3) {
+        const backoff = 50 * Math.pow(2, attempts) + Math.random() * 40;
+        await delay(backoff);
+      } else {
+        console.error('[Sync Helper] Error syncing task with order status:', err.message);
+        break;
       }
     }
-    console.log(`[Sync Helper] Synced task for order ${orderNumber} -> status: ${taskStatus}`);
-  } catch (err) {
-    console.error('[Sync Helper] Error syncing task with order status:', err.message);
   }
 };
 
