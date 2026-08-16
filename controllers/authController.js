@@ -447,11 +447,516 @@ const verifyLicense = async (req, res) => {
   }
 };
 
+const staffLogin = async (req, res) => {
+  const { username, pin, password } = req.body;
+  const credential = pin || password;
+  const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.body.license_key;
+
+  if (!username || !credential) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: 'Username and PIN/password are required.'
+    });
+  }
+
+  if (!licenseKey) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: 'License key (x-license-key header) is required.'
+    });
+  }
+
+  try {
+    const { resolvePoolForLicense } = require('../config/db');
+    const resolved = await resolvePoolForLicense(licenseKey);
+
+    if (!resolved || resolved.error || resolved.status !== 'active') {
+      return res.status(403).json({
+        success: false,
+        data: null,
+        error: resolved?.error || 'Invalid or inactive license key.'
+      });
+    }
+
+    const restaurantId = resolved.restaurantId;
+    const crypto = require('crypto');
+    const inputPinHash = crypto.createHash('sha256').update(String(credential).trim()).digest('hex');
+
+    const [rows] = await pool.query(
+      `SELECT id, restaurant_id, name, username, pin_hash, role_id, role, status, permissions, 
+              assigned_categories, assigned_items, assigned_order_types 
+       FROM _pos_staff_base 
+       WHERE username = ? AND restaurant_id = ?`,
+      [username.trim(), restaurantId]
+    );
+
+    if (rows.length === 0) {
+      return res.status(401).json({
+        success: false,
+        data: null,
+        error: 'Invalid username or PIN.'
+      });
+    }
+
+    const staff = rows[0];
+
+    if (staff.status !== 'Active') {
+      return res.status(403).json({
+        success: false,
+        data: null,
+        error: 'Staff account is deactivated or inactive.'
+      });
+    }
+
+    // Compare PIN hash
+    if (staff.pin_hash !== inputPinHash) {
+      return res.status(401).json({
+        success: false,
+        data: null,
+        error: 'Invalid username or PIN.'
+      });
+    }
+
+    // Parse permissions
+    let parsedPermissions = [];
+    if (staff.permissions) {
+      try {
+        parsedPermissions = typeof staff.permissions === 'string' ? JSON.parse(staff.permissions) : staff.permissions;
+      } catch (_) {
+        parsedPermissions = [];
+      }
+    }
+
+    // Check attendance status today
+    const [attRows] = await pool.query(
+      `SELECT id, clock_in FROM _pos_attendance_base 
+       WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL 
+       ORDER BY id DESC LIMIT 1`,
+      [staff.id, restaurantId]
+    );
+
+    const isClockedIn = attRows.length > 0;
+    const attendanceRecord = isClockedIn ? attRows[0] : null;
+
+    const payload = {
+      id: staff.id,
+      role: staff.role,
+      username: staff.username,
+      restaurantId: staff.restaurant_id,
+      permissions: parsedPermissions
+    };
+
+    const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+    const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+    return res.json({
+      success: true,
+      data: {
+        accessToken,
+        refreshToken,
+        staff: {
+          id: staff.id,
+          name: staff.name,
+          username: staff.username,
+          role: staff.role,
+          status: staff.status,
+          permissions: parsedPermissions,
+          isClockedIn,
+          attendanceRecord,
+          assigned_categories: staff.assigned_categories,
+          assigned_items: staff.assigned_items,
+          assigned_order_types: staff.assigned_order_types,
+          restaurantId: staff.restaurant_id
+        }
+      },
+      error: null
+    });
+  } catch (error) {
+    console.error('Staff login error:', error);
+    return res.status(500).json({
+      success: false,
+      data: null,
+      error: 'An internal server error occurred.'
+    });
+  }
+};
+
+const unifiedLogin = async (req, res) => {
+  const { username, credential, password, pin } = req.body;
+  const cred = credential || password || pin;
+  const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.body.license_key;
+
+  if (!username || !cred) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: 'Username and credentials are required.'
+    });
+  }
+
+  if (!licenseKey) {
+    return res.status(400).json({
+      success: false,
+      data: null,
+      error: 'License key is required.'
+    });
+  }
+
+  try {
+    const { resolvePoolForLicense } = require('../config/db');
+    const resolved = await resolvePoolForLicense(licenseKey);
+
+    if (!resolved || resolved.error || resolved.status !== 'active') {
+      return res.status(403).json({
+        success: false,
+        data: null,
+        error: resolved?.error || 'Invalid or inactive license key.'
+      });
+    }
+
+    const restaurantId = resolved.restaurantId;
+    const cleanUsername = username.trim();
+    const cleanCred = String(cred).trim();
+
+    // 1. Try Staff PIN match first
+    const crypto = require('crypto');
+    const inputPinHash = crypto.createHash('sha256').update(cleanCred).digest('hex');
+
+    const [staffRows] = await pool.query(
+      `SELECT id, restaurant_id, name, username, pin_hash, role_id, role, status, permissions,
+              assigned_categories, assigned_items, assigned_order_types 
+       FROM _pos_staff_base 
+       WHERE username = ? AND restaurant_id = ?`,
+      [cleanUsername, restaurantId]
+    );
+
+    if (staffRows.length > 0) {
+      const staff = staffRows[0];
+      if (staff.pin_hash === inputPinHash && staff.status === 'Active') {
+        let parsedPermissions = [];
+        if (staff.permissions) {
+          try {
+            parsedPermissions = typeof staff.permissions === 'string' ? JSON.parse(staff.permissions) : staff.permissions;
+          } catch (_) {
+            parsedPermissions = [];
+          }
+        }
+
+        const [attRows] = await pool.query(
+          `SELECT id, clock_in FROM _pos_attendance_base 
+           WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL 
+           ORDER BY id DESC LIMIT 1`,
+          [staff.id, restaurantId]
+        );
+
+        const isClockedIn = attRows.length > 0;
+        const payload = {
+          id: staff.id,
+          role: staff.role,
+          username: staff.username,
+          restaurantId: staff.restaurant_id,
+          permissions: parsedPermissions
+        };
+
+        const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+        const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+        return res.json({
+          success: true,
+          data: {
+            userType: 'staff',
+            role: staff.role,
+            accessToken,
+            refreshToken,
+            user: {
+              id: staff.id,
+              name: staff.name,
+              username: staff.username,
+              role: staff.role,
+              status: staff.status,
+              permissions: parsedPermissions,
+              isClockedIn,
+              attendanceRecord: isClockedIn ? attRows[0] : null,
+              assigned_categories: staff.assigned_categories,
+              assigned_items: staff.assigned_items,
+              assigned_order_types: staff.assigned_order_types,
+              restaurantId: staff.restaurant_id
+            }
+          },
+          error: null
+        });
+      }
+    }
+
+    // 2. Try Rider Password
+    const [riderRows] = await pool.query(
+      'SELECT id, username, password_hash, full_name, phone, status, is_active, restaurant_id FROM _riders_base WHERE username = ? AND restaurant_id = ?',
+      [cleanUsername, restaurantId]
+    );
+
+    if (riderRows.length > 0) {
+      const rider = riderRows[0];
+      if (rider.is_active) {
+        const isMatch = await bcrypt.compare(cleanCred, rider.password_hash);
+        if (isMatch) {
+          const payload = { id: rider.id, role: 'rider', username: rider.username, restaurantId: rider.restaurant_id };
+          const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+          const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+          const refreshTokenHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+          await pool.query(
+            'UPDATE _riders_base SET status = ?, refresh_token_hash = ? WHERE id = ? AND restaurant_id = ?',
+            ['idle', refreshTokenHash, rider.id, restaurantId]
+          );
+
+          // Check if rider is clocked in today
+          const [attRows] = await pool.query(
+            `SELECT a.id, a.clock_in FROM _pos_attendance_base a
+             JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+             WHERE s.username = ? AND a.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
+            [rider.username, restaurantId]
+          );
+
+          const isClockedIn = attRows.length > 0;
+
+          return res.json({
+            success: true,
+            data: {
+              userType: 'rider',
+              role: 'rider',
+              accessToken,
+              refreshToken,
+              user: {
+                id: rider.id,
+                username: rider.username,
+                full_name: rider.full_name,
+                phone: rider.phone,
+                status: 'idle',
+                isClockedIn,
+                clockInTime: isClockedIn ? attRows[0].clock_in : null,
+                restaurantId: rider.restaurant_id
+              }
+            },
+            error: null
+          });
+        }
+      }
+    }
+
+    // 3. Try Admin Password
+    const [adminRows] = await pool.query(
+      'SELECT id, username, password_hash, restaurant_id FROM _admins_base WHERE username = ? AND restaurant_id = ?',
+      [cleanUsername, restaurantId]
+    );
+
+    if (adminRows.length > 0) {
+      const admin = adminRows[0];
+      const isMatch = await bcrypt.compare(cleanCred, admin.password_hash);
+      if (isMatch) {
+        const payload = { id: admin.id, role: 'admin', username: admin.username, restaurantId: admin.restaurant_id };
+        const accessToken = jwt.sign(payload, JWT_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRY });
+        const refreshToken = jwt.sign(payload, JWT_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRY });
+
+        return res.json({
+          success: true,
+          data: {
+            userType: 'admin',
+            role: 'admin',
+            accessToken,
+            refreshToken,
+            user: {
+              id: admin.id,
+              username: admin.username,
+              role: 'admin',
+              restaurantId: admin.restaurant_id
+            }
+          },
+          error: null
+        });
+      }
+    }
+
+    return res.status(401).json({
+      success: false,
+      data: null,
+      error: 'Invalid credentials.'
+    });
+
+  } catch (error) {
+    console.error('Unified login error:', error);
+    return res.status(500).json({
+      success: false,
+      data: null,
+      error: 'An internal server error occurred.'
+    });
+  }
+};
+
+const riderClockIn = async (req, res) => {
+  const riderId = req.user.id;
+  const restaurantId = req.user.restaurantId;
+
+  try {
+    const [riderRows] = await pool.query(
+      'SELECT id, username, full_name, restaurant_id FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+      [riderId, restaurantId]
+    );
+
+    if (riderRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Rider profile not found.' });
+    }
+
+    const rider = riderRows[0];
+
+    // Find or create matching record in _pos_staff_base for attendance tracking
+    let staffId = null;
+    const [staffRows] = await pool.query(
+      'SELECT id FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?',
+      [rider.username, restaurantId]
+    );
+
+    if (staffRows.length > 0) {
+      staffId = staffRows[0].id;
+    } else {
+      const [insStaff] = await pool.query(
+        `INSERT INTO _pos_staff_base (restaurant_id, name, username, role, status)
+         VALUES (?, ?, ?, 'Rider', 'Active')`,
+        [restaurantId, rider.full_name || rider.username, rider.username]
+      );
+      staffId = insStaff.insertId;
+    }
+
+    // Check if already clocked in today
+    const [openAttendance] = await pool.query(
+      `SELECT id, clock_in FROM _pos_attendance_base 
+       WHERE staff_id = ? AND restaurant_id = ? AND date = CURDATE() AND clock_out IS NULL`,
+      [staffId, restaurantId]
+    );
+
+    let attId = null;
+    let clockInTime = null;
+
+    if (openAttendance.length > 0) {
+      attId = openAttendance[0].id;
+      clockInTime = openAttendance[0].clock_in;
+    } else {
+      const [insAtt] = await pool.query(
+        `INSERT INTO _pos_attendance_base (restaurant_id, staff_id, date, clock_in, verification_method)
+         VALUES (?, ?, CURDATE(), NOW(), 'Mobile')`,
+        [restaurantId, staffId]
+      );
+      attId = insAtt.insertId;
+      clockInTime = new Date().toISOString();
+    }
+
+    // Update rider status to idle
+    await pool.query(
+      'UPDATE _riders_base SET status = ? WHERE id = ? AND restaurant_id = ?',
+      ['idle', riderId, restaurantId]
+    );
+
+    // Broadcast socket event and join rider to dispatch rooms
+    const io = req.app.get('io');
+    const licenseKey = req.headers['x-license-key'] || req.query.license_key;
+    if (io && licenseKey) {
+      io.to(`rider:${licenseKey}:${riderId}`).emit('rider:duty:change', {
+        riderId,
+        isClockedIn: true,
+        clockInTime
+      });
+      io.to(`admin:${licenseKey}`).emit('rider:status:update', { riderId, status: 'idle' });
+      io.to(`admin:${licenseKey}`).emit('attendance:change', { staff_id: staffId, clocked_in: true });
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        isClockedIn: true,
+        clockInTime,
+        attendanceId: attId
+      }
+    });
+  } catch (error) {
+    console.error('Rider clock-in error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to clock in.' });
+  }
+};
+
+const riderClockOut = async (req, res) => {
+  const riderId = req.user.id;
+  const restaurantId = req.user.restaurantId;
+
+  try {
+    const [riderRows] = await pool.query(
+      'SELECT id, username, restaurant_id FROM _riders_base WHERE id = ? AND restaurant_id = ?',
+      [riderId, restaurantId]
+    );
+
+    if (riderRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Rider profile not found.' });
+    }
+
+    const rider = riderRows[0];
+
+    // Find matching staff record
+    const [staffRows] = await pool.query(
+      'SELECT id FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?',
+      [rider.username, restaurantId]
+    );
+
+    let staffId = staffRows.length > 0 ? staffRows[0].id : null;
+
+    if (staffId) {
+      await pool.query(
+        `UPDATE _pos_attendance_base 
+         SET clock_out = NOW() 
+         WHERE staff_id = ? AND restaurant_id = ? AND clock_out IS NULL`,
+        [staffId, restaurantId]
+      );
+    }
+
+    // Set rider status to offline
+    await pool.query(
+      'UPDATE _riders_base SET status = ? WHERE id = ? AND restaurant_id = ?',
+      ['offline', riderId, restaurantId]
+    );
+
+    const io = req.app.get('io');
+    const licenseKey = req.headers['x-license-key'] || req.query.license_key;
+    if (io && licenseKey) {
+      io.to(`rider:${licenseKey}:${riderId}`).emit('rider:duty:change', {
+        riderId,
+        isClockedIn: false
+      });
+      io.to(`admin:${licenseKey}`).emit('rider:status:update', { riderId, status: 'offline' });
+      if (staffId) {
+        io.to(`admin:${licenseKey}`).emit('attendance:change', { staff_id: staffId, clocked_in: false });
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        isClockedIn: false
+      }
+    });
+  } catch (error) {
+    console.error('Rider clock-out error:', error);
+    return res.status(500).json({ success: false, error: 'Failed to clock out.' });
+  }
+};
+
 module.exports = {
   riderLogin,
   adminLogin,
+  staffLogin,
+  unifiedLogin,
   refreshToken,
   riderLogout,
   getRiderDutyStatus,
+  riderClockIn,
+  riderClockOut,
   verifyLicense
 };

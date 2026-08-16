@@ -15,9 +15,26 @@ function getConnectedDeviceCounts(restaurantId) {
   return activeDevices[restaurantId] || { rider: 0, pos: 0 };
 }
 
+async function isRiderClockedIn(riderId, restaurantId) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT a.id, a.clock_in FROM _pos_attendance_base a
+       JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+       JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
+       WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
+      [riderId, restaurantId]
+    );
+    return rows.length > 0;
+  } catch (err) {
+    console.error('[isRiderClockedIn Error]', err);
+    return false;
+  }
+}
+
 module.exports = (io) => {
-  // Expose getConnectedDeviceCounts as a static method on the exported function
+  // Expose getConnectedDeviceCounts and isRiderClockedIn
   module.exports.getConnectedDeviceCounts = getConnectedDeviceCounts;
+  module.exports.isRiderClockedIn = isRiderClockedIn;
 
   // Handshake middleware to authenticate the license key first
   io.use(async (socket, next) => {
@@ -57,7 +74,7 @@ module.exports = (io) => {
       activeDevices[socket.restaurantId][deviceType]++;
     }
 
-    // Immediately authorize and join rider to their room if query params are present in the handshake
+    // Immediately authorize and configure rider rooms if query params are present in the handshake
     const { token, riderId } = socket.handshake.query;
     if (token && riderId) {
       try {
@@ -67,26 +84,32 @@ module.exports = (io) => {
           socket.role = 'rider';
           socket.username = decoded.username;
 
-          // Join tenant-scoped rider rooms instantly on handshake
-          socket.join(`rider:${socket.licenseKey}:${decoded.id}`);
-          socket.join(`riders:${socket.licenseKey}`);
-          socket.join(`rider_${decoded.id}`);
-
-          console.log(`[Handshake Auth] Rider ${decoded.id} instantly joined tenant ${socket.licenseKey} rooms.`);
-
-          // Update database session state asynchronously in tenant context
+          // Check if rider is clocked in before joining active dispatch rooms
           asyncLocalStorage.run(
             { pool, licenseKey: socket.licenseKey, restaurantId: socket.restaurantId },
             async () => {
               try {
+                const isOnDuty = await isRiderClockedIn(decoded.id, socket.restaurantId);
+                socket.isOnDuty = isOnDuty;
+
+                if (isOnDuty) {
+                  socket.join(`rider:${socket.licenseKey}:${decoded.id}`);
+                  socket.join(`riders:${socket.licenseKey}`);
+                  socket.join(`rider_${decoded.id}`);
+                  console.log(`[Handshake Auth] Rider ${decoded.id} (ON DUTY) joined tenant ${socket.licenseKey} dispatch rooms.`);
+                } else {
+                  console.log(`[Handshake Auth] Rider ${decoded.id} (OFF DUTY) connected — dispatch rooms suppressed until clock-in.`);
+                }
+
                 await pool.query(
                   'INSERT INTO rider_sessions (rider_id, socket_id, connected_at) VALUES (?, ?, NOW()) ON DUPLICATE KEY UPDATE socket_id = VALUES(socket_id), connected_at = NOW()',
                   [decoded.id, socket.id]
                 );
-                await pool.query('UPDATE riders SET status = ? WHERE id = ? AND status = ?', ['idle', decoded.id, 'offline']);
-                socket.emit('connected:confirmed', { success: true, role: 'rider' });
+                const riderStatus = isOnDuty ? 'idle' : 'offline';
+                await pool.query('UPDATE riders SET status = ? WHERE id = ?', [riderStatus, decoded.id]);
+                socket.emit('connected:confirmed', { success: true, role: 'rider', isOnDuty });
                 io.to(`admin:${socket.licenseKey}`).emit('rider:online', { riderId: decoded.id });
-                io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId: decoded.id, status: 'idle' });
+                io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId: decoded.id, status: riderStatus });
               } catch (dbErr) {
                 console.error('[Handshake Auth DB Error]', dbErr);
               }
@@ -125,7 +148,7 @@ module.exports = (io) => {
       };
     };
 
-    // Rider Authentication
+    // Rider Authentication via message
     socket.on('rider:connect', runInContext(async (payload) => {
       const { token } = payload || {};
 
@@ -145,7 +168,6 @@ module.exports = (io) => {
           }
         }
 
-        // If handshake already authenticated rider, use handshake riderId
         if (socket.riderId) {
           riderId = socket.riderId;
         }
@@ -155,8 +177,18 @@ module.exports = (io) => {
           socket.role = 'rider';
           socket.username = username;
 
-          socket.join(`rider:${socket.licenseKey}:${riderId}`);
-          socket.join(`riders:${socket.licenseKey}`);
+          const isOnDuty = await isRiderClockedIn(riderId, socket.restaurantId);
+          socket.isOnDuty = isOnDuty;
+
+          if (isOnDuty) {
+            socket.join(`rider:${socket.licenseKey}:${riderId}`);
+            socket.join(`riders:${socket.licenseKey}`);
+            socket.join(`rider_${riderId}`);
+          } else {
+            socket.leave(`rider:${socket.licenseKey}:${riderId}`);
+            socket.leave(`riders:${socket.licenseKey}`);
+            socket.leave(`rider_${riderId}`);
+          }
 
           if (payload.fcmToken) {
             try {
@@ -164,9 +196,9 @@ module.exports = (io) => {
             } catch (_) {}
           }
 
-          socket.emit('connected:confirmed', { success: true, role: 'rider' });
+          socket.emit('connected:confirmed', { success: true, role: 'rider', isOnDuty });
           io.to(`admin:${socket.licenseKey}`).emit('rider:online', { riderId });
-          console.log(`Rider ${riderId} connected to tenant ${socket.licenseKey} room.`);
+          console.log(`Rider ${riderId} connected (isOnDuty: ${isOnDuty}).`);
           return;
         }
 
@@ -184,6 +216,30 @@ module.exports = (io) => {
         console.error('Socket auth error (rider):', err);
         socket.emit('auth:error', { error: 'Authentication failed.' });
       }
+    }));
+
+    // Dynamic Clock-In / Duty status change over Socket
+    socket.on('rider:duty:change', runInContext(async (payload) => {
+      if (socket.role !== 'rider' || !socket.riderId) return;
+      const { isClockedIn } = payload || {};
+      socket.isOnDuty = !!isClockedIn;
+
+      if (socket.isOnDuty) {
+        socket.join(`rider:${socket.licenseKey}:${socket.riderId}`);
+        socket.join(`riders:${socket.licenseKey}`);
+        socket.join(`rider_${socket.riderId}`);
+        await pool.query('UPDATE riders SET status = ? WHERE id = ?', ['idle', socket.riderId]);
+        io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId: socket.riderId, status: 'idle' });
+        console.log(`[Socket Duty] Rider ${socket.riderId} joined active dispatch rooms (ON DUTY).`);
+      } else {
+        socket.leave(`rider:${socket.licenseKey}:${socket.riderId}`);
+        socket.leave(`riders:${socket.licenseKey}`);
+        socket.leave(`rider_${socket.riderId}`);
+        await pool.query('UPDATE riders SET status = ? WHERE id = ?', ['offline', socket.riderId]);
+        io.to(`admin:${socket.licenseKey}`).emit('rider:status:update', { riderId: socket.riderId, status: 'offline' });
+        console.log(`[Socket Duty] Rider ${socket.riderId} left active dispatch rooms (OFF DUTY).`);
+      }
+      socket.emit('rider:duty:confirmed', { isClockedIn: socket.isOnDuty });
     }));
 
     // Admin Authentication
@@ -419,6 +475,11 @@ module.exports = (io) => {
       const riderId = socket.riderId;
 
       try {
+        const isClocked = await isRiderClockedIn(riderId, socket.restaurantId);
+        if (!isClocked) {
+          return socket.emit('task:accept:error', { taskId, error: 'Duty clock-in required. You must clock in to accept orders.' });
+        }
+
         const [taskRows] = await pool.query('SELECT * FROM tasks WHERE id = ?', [taskId]);
         if (taskRows.length === 0) {
           return socket.emit('task:accept:error', { taskId, error: 'Task not found.' });

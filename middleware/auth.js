@@ -173,9 +173,50 @@ const checkPermission = (permission) => {
   };
 };
 
+const enforceCloudReadOnlyForNonRiders = (req, res, next) => {
+  // Allow all read requests
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') {
+    return next();
+  }
+
+  if (req.user) {
+    const role = (req.user.role || '').toLowerCase();
+    
+    // Riders have full read/write through the Cloud API
+    if (role === 'rider') {
+      return next();
+    }
+
+    // Super Admin has full write access
+    if (role === 'super_admin') {
+      return next();
+    }
+
+    // Trusted local POS desktop sync gateway
+    if (role === 'admin' && req.user.username === 'pos_client') {
+      return next();
+    }
+
+    // Tenant admin user
+    if (role === 'admin') {
+      return next();
+    }
+
+    // Non-rider staff attempting writes on Cloud API
+    return res.status(403).json({
+      success: false,
+      data: null,
+      error: 'Cloud Fallback Mode: Operational write actions are disabled for staff when connecting directly to Cloud API. Local main server connection is required for transactions.'
+    });
+  }
+
+  next();
+};
+
 module.exports = {
   authenticateJWT,
   requireAdmin,
   requireRider,
-  checkPermission
+  checkPermission,
+  enforceCloudReadOnlyForNonRiders
 };

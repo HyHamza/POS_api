@@ -211,23 +211,44 @@ const createTask = async (req, res) => {
     const io = req.app.get('io');
     const licenseKey = req.headers['x-license-key'] || req.query.license_key;
     if (rider_id) {
-      if (io) {
-        // Emit task:new to specific rider's room
-        io.to(`rider:${licenseKey}:${rider_id}`).emit('task:new', createdTask);
-        console.log(`[Rider API] Sent socket event 'task:new' to rider:${licenseKey}:${rider_id} for Task ID: ${taskId}`);
+      // Server-Side Clock-In Verification for specific rider
+      const [attRows] = await pool.query(
+        `SELECT a.id FROM _pos_attendance_base a
+         JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+         JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
+         WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
+        [rider_id, restaurantId]
+      );
+      const isClockedIn = attRows.length > 0;
+
+      if (isClockedIn) {
+        if (io) {
+          // Emit task:new to specific rider's room
+          io.to(`rider:${licenseKey}:${rider_id}`).emit('task:new', createdTask);
+          console.log(`[Rider API] Sent socket event 'task:new' to rider:${licenseKey}:${rider_id} for Task ID: ${taskId}`);
+        }
+        // Send background push notification alert
+        sendTaskNotification(rider_id, createdTask)
+          .then(() => console.log(`[Rider API] Push notification triggered for rider:${rider_id} on Task ID: ${taskId}`))
+          .catch(err => console.error('Notification error:', err));
+      } else {
+        console.log(`[Rider API] Rider ${rider_id} is OFF DUTY (not clocked in). Suppressed task:new socket event and push notification.`);
       }
-      // Send background push notification alert (stable interface placeholder)
-      sendTaskNotification(rider_id, createdTask)
-        .then(() => console.log(`[Rider API] Push notification triggered for rider:${rider_id} on Task ID: ${taskId}`))
-        .catch(err => console.error('Notification error:', err));
     } else {
       if (io) {
         // Broadcast task:available to all connected riders in the general room
         io.to(`riders:${licenseKey}`).emit('task:available', createdTask);
         console.log(`[Rider API] Broadcasted socket event 'task:available' to riders:${licenseKey} room for Task ID: ${taskId}`);
       }
-      // Send background push notification to all active riders of this restaurant
-      pool.query('SELECT id FROM _riders_base WHERE restaurant_id = ? AND is_active = 1 AND fcm_token IS NOT NULL', [restaurantId])
+      // Send background push notification only to active AND clocked-in riders of this restaurant
+      pool.query(
+        `SELECT r.id FROM _riders_base r
+         JOIN _pos_staff_base s ON r.username = s.username AND r.restaurant_id = s.restaurant_id
+         JOIN _pos_attendance_base a ON a.staff_id = s.id AND a.restaurant_id = s.restaurant_id
+         WHERE r.restaurant_id = ? AND r.is_active = 1 AND r.fcm_token IS NOT NULL
+           AND a.date = CURDATE() AND a.clock_out IS NULL`,
+        [restaurantId]
+      )
         .then(([riders]) => {
           for (const r of riders) {
             sendTaskNotification(r.id, createdTask).catch(err => console.error('Notification error:', err));
@@ -277,6 +298,24 @@ const updateTaskStatus = async (req, res) => {
         data: null,
         error: 'Restaurant context not found.'
       });
+    }
+
+    // Server-side Rider Duty Check: Riders must be clocked in to accept or update tasks
+    if (role === 'rider') {
+      const [dutyRows] = await pool.query(
+        `SELECT a.id FROM _pos_attendance_base a
+         JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
+         JOIN _riders_base r ON s.username = r.username AND r.restaurant_id = s.restaurant_id
+         WHERE r.id = ? AND r.restaurant_id = ? AND a.date = CURDATE() AND a.clock_out IS NULL`,
+        [userId, restaurantId]
+      );
+      if (dutyRows.length === 0) {
+        return res.status(403).json({
+          success: false,
+          data: null,
+          error: 'Duty clock-in required. You must clock in before accepting or handling orders.'
+        });
+      }
     }
 
     // Fetch current task with restaurant_id filter

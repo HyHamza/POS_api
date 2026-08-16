@@ -653,6 +653,8 @@ const getRestaurantsOverview = async (req, res) => {
         r.plan_type,
         r.expires_at,
         r.created_at,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currencyPlacement' LIMIT 1) as currency_placement,
         (SELECT COUNT(*) FROM _pos_staff_base WHERE restaurant_id = r.id AND (is_deleted = 0 OR is_deleted IS NULL)) as employee_count,
         (SELECT COUNT(*) FROM _pos_orders_base WHERE restaurant_id = r.id AND status = 'completed') as total_orders,
         (SELECT COALESCE(SUM(total), 0) FROM _pos_orders_base WHERE restaurant_id = r.id AND status = 'completed') as total_sales,
@@ -708,7 +710,8 @@ const getAllEmployees = async (req, res) => {
         s.created_at,
         r.name as restaurant_name,
         r.id as restaurant_id,
-        r.license_key
+        r.license_key,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency
       FROM _pos_staff_base s
       JOIN restaurants r ON s.restaurant_id = r.id
       WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
@@ -763,6 +766,8 @@ const getSalesAnalytics = async (req, res) => {
         r.id as restaurant_id,
         r.name as restaurant_name,
         r.license_key,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currencyPlacement' LIMIT 1) as currency_placement,
         COUNT(o.id) as order_count,
         COALESCE(SUM(o.total), 0) as total_sales,
         COALESCE(SUM(o.subtotal), 0) as subtotal,
@@ -805,6 +810,7 @@ const getSalesAnalytics = async (req, res) => {
         oi.name as item_name,
         oi.price,
         r.name as restaurant_name,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
         COUNT(oi.id) as times_ordered,
         SUM(oi.quantity) as total_quantity,
         SUM(oi.price * oi.quantity) as total_revenue
@@ -904,6 +910,7 @@ const getAllInventory = async (req, res) => {
         r.name as restaurant_name,
         r.id as restaurant_id,
         r.license_key,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
         CASE WHEN i.quantity <= i.min_threshold THEN 1 ELSE 0 END as is_low_stock
       FROM _pos_inventory_items_base i
       JOIN restaurants r ON i.restaurant_id = r.id
@@ -930,6 +937,7 @@ const getAllInventory = async (req, res) => {
       SELECT 
         r.name as restaurant_name,
         r.id as restaurant_id,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
         COUNT(i.id) as total_items,
         SUM(CASE WHEN i.quantity <= i.min_threshold THEN 1 ELSE 0 END) as low_stock_count,
         SUM(i.quantity * i.cost_per_unit) as total_inventory_value
@@ -1000,7 +1008,8 @@ const getAllMenus = async (req, res) => {
         c.name as category_name,
         r.name as restaurant_name,
         r.id as restaurant_id,
-        r.license_key
+        r.license_key,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency
       FROM _pos_menu_items_base i
       JOIN _pos_menu_categories_base c ON i.category_id = c.id
       JOIN restaurants r ON i.restaurant_id = r.id
@@ -1020,6 +1029,7 @@ const getAllMenus = async (req, res) => {
       SELECT 
         r.name as restaurant_name,
         r.id as restaurant_id,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
         COUNT(DISTINCT c.id) as category_count,
         COUNT(i.id) as item_count,
         SUM(CASE WHEN i.is_available = 1 THEN 1 ELSE 0 END) as available_items,
@@ -1074,6 +1084,8 @@ const getAllOrders = async (req, res) => {
         r.name as restaurant_name,
         r.id as restaurant_id,
         r.license_key,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currency' LIMIT 1) as currency,
+        (SELECT value FROM _pos_settings_base WHERE restaurant_id = r.id AND \`key\` = 'currencyPlacement' LIMIT 1) as currency_placement,
         s.name as staff_name,
         t.number as table_number
       FROM _pos_orders_base o
