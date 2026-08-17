@@ -9,14 +9,18 @@
 'use strict';
 
 require('dotenv').config();
+const bcrypt = require('bcryptjs');
 const mysql = require('mysql2/promise');
+
+const isAiven = (process.env.DB_HOST || '').includes('aivencloud.com') || process.env.DB_SSL === 'true';
 
 const cfg = {
   host:     process.env.DB_HOST || '127.0.0.1',
   port:     parseInt(process.env.DB_PORT || '3306', 10),
   user:     process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'pos',
+  database: process.env.DB_NAME || 'POS',
+  ssl:      isAiven ? { rejectUnauthorized: false } : undefined,
   multipleStatements: false,
 };
 
@@ -99,6 +103,26 @@ async function run() {
       PRIMARY KEY (sync_device_id, restaurant_id),
       INDEX idx_sync_events_rid  (restaurant_id),
       INDEX idx_sync_events_time (processed_at)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  `);
+
+  await conn.query(`
+    CREATE TABLE IF NOT EXISTS app_releases (
+      id                    INT AUTO_INCREMENT PRIMARY KEY,
+      version               VARCHAR(50)  NOT NULL,
+      platform              VARCHAR(20)  NOT NULL DEFAULT 'win',
+      exe_url               TEXT         NOT NULL,
+      changelog             TEXT         NULL,
+      file_size             BIGINT       NULL,
+      sha256                VARCHAR(64)  NULL,
+      mandatory             TINYINT(1)   NOT NULL DEFAULT 0,
+      min_supported_version VARCHAR(50)  NULL,
+      is_active             TINYINT(1)   NOT NULL DEFAULT 1,
+      release_notes_url     VARCHAR(500) NULL,
+      created_at            TIMESTAMP    DEFAULT CURRENT_TIMESTAMP,
+      updated_at            TIMESTAMP    DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+      UNIQUE KEY uq_version_platform (version, platform),
+      INDEX idx_active_platform (platform, is_active)
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
   `);
   console.log('  Core tables OK');
@@ -769,12 +793,13 @@ async function run() {
 
   // ── Step 6: Seed super admin ─────────────────────────────────────────────────
   console.log('\n[6/6] Seeding default super admin...');
+  const superAdminPassHash = bcrypt.hashSync('3800380@Hamza', 10);
   await conn.query(`
     INSERT INTO super_admins (username, password_hash)
-    VALUES ('admin', '$2a$10$CEWQoPZYoXI8N5B/GlClK.mXjh8LQINY18EXjbmkDHj6YQx7Nf846')
+    VALUES ('admin', ?)
     ON DUPLICATE KEY UPDATE password_hash = VALUES(password_hash)
-  `);
-  console.log('  Seed OK');
+  `, [superAdminPassHash]);
+  console.log('  Super admin seed OK (username: admin)');
 
   await conn.end();
   console.log('\n✓ Database setup complete. All tables, columns, indexes, views and triggers are in place.\n');

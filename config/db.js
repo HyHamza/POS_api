@@ -4,16 +4,19 @@ require('dotenv').config();
 
 const asyncLocalStorage = new AsyncLocalStorage();
 
+const isAiven = (process.env.DB_HOST || '').includes('aivencloud.com') || process.env.DB_SSL === 'true';
+
 // Connection parameters for database server
 const dbConfig = {
   host: process.env.DB_HOST || '127.0.0.1',
   user: process.env.DB_USER || 'root',
   password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'rider_tracking',
+  database: process.env.DB_NAME || 'POS',
   port: parseInt(process.env.DB_PORT || '3306', 10),
   connectionLimit: 10,
   waitForConnections: true,
-  queueLimit: 0
+  queueLimit: 0,
+  ssl: isAiven ? { rejectUnauthorized: false } : undefined
 };
 
 // Main pool pointing to the unified database

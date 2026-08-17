@@ -1,13 +1,10 @@
 const { mainPool: db } = require('../config/db');
 
 /**
- * Middleware to intercept API requests and save them to _pos_system_logs_base
+ * Middleware to intercept API requests and save them to _pos_system_logs_base.
+ * PROTECTED: Only logs errors (status >= 400) to prevent database bloat and excessive IOPS.
  */
 async function apiLogger(req, res, next) {
-  // Capture start time to potentially calculate latency
-  const start = Date.now();
-  
-  // Capture original end and send methods
   const originalEnd = res.end;
   const originalSend = res.send;
   let responseBody = '';
@@ -23,6 +20,15 @@ async function apiLogger(req, res, next) {
     }
     originalEnd.apply(res, arguments);
 
+    // Only record in database if an actual error occurred (status >= 400)
+    // Routine 200/304 requests, location updates, and health checks are skipped to save DB size.
+    const isError = res.statusCode >= 400;
+    const verboseLogging = process.env.ENABLE_VERBOSE_DB_LOGGING === 'true';
+
+    if (!isError && !verboseLogging) {
+      return;
+    }
+
     // Run logging asynchronously to avoid blocking the response
     setImmediate(async () => {
       try {
@@ -31,21 +37,23 @@ async function apiLogger(req, res, next) {
 
         const deviceType = req.headers['x-device-type'] || 'Unknown';
         
-        // Don't log the log fetching endpoint itself to prevent infinite loop of logs
-        if (req.originalUrl.includes('/api/admin/logs')) return;
+        // Don't log the log fetching or health endpoints to prevent infinite loops
+        if (req.originalUrl.includes('/api/admin/logs') || req.originalUrl.includes('/api/health')) return;
 
         let errorDetails = null;
         if (res.statusCode >= 400) {
-          errorDetails = responseBody || res.statusMessage;
+          errorDetails = typeof responseBody === 'string' ? responseBody.substring(0, 1000) : res.statusMessage;
         }
 
-        // Limit payload logging size to prevent huge DB bloat (e.g. max 2KB)
+        // Limit payload logging size to max 500 chars to prevent DB bloat
         let payload = '';
         if (req.body && Object.keys(req.body).length > 0) {
-          payload = JSON.stringify(req.body);
-          if (payload.length > 2000) {
-            payload = payload.substring(0, 2000) + '... (truncated)';
-          }
+          try {
+            payload = JSON.stringify(req.body);
+            if (payload.length > 500) {
+              payload = payload.substring(0, 500) + '... (truncated)';
+            }
+          } catch (_) {}
         }
 
         const query = `
@@ -57,7 +65,7 @@ async function apiLogger(req, res, next) {
         const params = [
           restaurantId,
           deviceType,
-          req.originalUrl,
+          req.originalUrl.substring(0, 255),
           req.method,
           res.statusCode,
           errorDetails,
@@ -66,7 +74,7 @@ async function apiLogger(req, res, next) {
 
         await db.execute(query, params);
       } catch (err) {
-        console.error('[System Logger] Failed to save log:', err.message);
+        console.error('[System Logger] Failed to save error log:', err.message);
       }
     });
   };

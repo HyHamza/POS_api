@@ -749,6 +749,24 @@ setInterval(async () => {
   }
 }, 15000); // Run every 15 seconds
 
+// ─── Automated Database Maintenance & Bloat Prevention (Runs Daily at 3:00 AM) ───
+cron.schedule('0 3 * * *', async () => {
+  try {
+    console.log('[Maintenance] Running daily cloud database cleanup...');
+    // 1. Prune system logs older than 7 days
+    const [dLogs] = await pool.query("DELETE FROM _pos_system_logs_base WHERE created_at < DATE_SUB(NOW(), INTERVAL 7 DAY)");
+    // 2. Prune old sync_events older than 7 days
+    const [dEvents] = await pool.query("DELETE FROM sync_events WHERE processed_at < DATE_SUB(NOW(), INTERVAL 7 DAY)");
+    // 3. Prune historical rider location breadcrumbs older than 2 days
+    const [dLocs] = await pool.query("DELETE FROM _rider_locations_base WHERE recorded_at < DATE_SUB(NOW(), INTERVAL 2 DAY)");
+    // 4. Prune read notifications older than 14 days
+    const [dNotifs] = await pool.query("DELETE FROM _pos_notifications_base WHERE is_read = 1 AND created_at < DATE_SUB(NOW(), INTERVAL 14 DAY)");
+    console.log(`[Maintenance] Daily cleanup completed. Pruned logs: ${dLogs.affectedRows || 0}, sync_events: ${dEvents.affectedRows || 0}, locations: ${dLocs.affectedRows || 0}, notifications: ${dNotifs.affectedRows || 0}`);
+  } catch (mErr) {
+    console.error('[Maintenance] Daily cleanup error:', mErr.message);
+  }
+});
+
 // JSON 404 Route handler
 app.use((req, res, next) => {
   res.status(404).json({
