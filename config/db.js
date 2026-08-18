@@ -16,6 +16,7 @@ const dbConfig = {
   connectionLimit: 10,
   waitForConnections: true,
   queueLimit: 0,
+  timezone: 'Z',
   ssl: isAiven ? { rejectUnauthorized: false } : undefined
 };
 

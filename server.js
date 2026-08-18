@@ -19,6 +19,19 @@ const dealRoutes = require('./routes/dealRoutes');
 const healthRoutes = require('./routes/healthRoutes');
 const superAdminRoutes = require('./routes/superAdminRoutes');
 const appUpdateRoutes = require('./routes/appUpdateRoutes');
+const reportRoutes = require('./routes/reportRoutes');
+const orderRoutes = require('./routes/orderRoutes');
+const menuRoutes = require('./routes/menuRoutes');
+const tableRoutes = require('./routes/tableRoutes');
+const staffRoutes = require('./routes/staffRoutes');
+const inventoryRoutes = require('./routes/inventoryRoutes');
+const financeRoutes = require('./routes/financeRoutes');
+const customerRoutes = require('./routes/customerRoutes');
+const settingRoutes = require('./routes/settingRoutes');
+const roleRoutes = require('./routes/roleRoutes');
+const notificationRoutes = require('./routes/notificationRoutes');
+const activityRoutes = require('./routes/activityRoutes');
+const dashboardRoutes = require('./routes/dashboardRoutes');
 const tenantMiddleware = require('./middleware/tenant');
 const apiLogger = require('./middleware/logger');
 
@@ -86,11 +99,24 @@ app.use(apiLogger);
 
 // Attach standard business routes
 app.use('/api/auth', authRoutes);
+app.use('/api/orders', orderRoutes);
+app.use('/api/menu', menuRoutes);
+app.use('/api/tables', tableRoutes);
+app.use('/api/staff', staffRoutes);
+app.use('/api/inventory', inventoryRoutes);
+app.use('/api/finance', financeRoutes);
+app.use('/api/customers', customerRoutes);
+app.use('/api/settings', settingRoutes);
+app.use('/api/roles', roleRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/activity', activityRoutes);
+app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/riders', riderRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/pos', posRoutes);
 app.use('/api/deals', dealRoutes);
 app.use('/api/health', healthRoutes);
+app.use('/api/reports', reportRoutes);
 
 // Database connection sanity test & auto schema generation on startup
 async function testDbConnection() {
@@ -482,6 +508,23 @@ async function testDbConnection() {
       }
     }
 
+    // Check and add assigned_categories, assigned_items, assigned_order_types to _pos_staff_base if missing
+    const staffColsToAdd = [
+      { name: 'assigned_categories', type: 'TEXT DEFAULT NULL' },
+      { name: 'assigned_items', type: 'TEXT DEFAULT NULL' },
+      { name: 'assigned_order_types', type: 'TEXT DEFAULT NULL' }
+    ];
+    for (const col of staffColsToAdd) {
+      const [exists] = await pool.query(`
+        SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_staff_base' AND COLUMN_NAME = ?
+      `, [col.name]);
+      if (exists.length === 0) {
+        console.log(`[Startup] Adding ${col.name} column to _pos_staff_base table...`);
+        await pool.query(`ALTER TABLE _pos_staff_base ADD COLUMN ${col.name} ${col.type}`);
+      }
+    }
+
     // Check and create _pos_customers_base table if it doesn't exist
     const [customersTableExists] = await pool.query(`
       SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
@@ -511,10 +554,40 @@ async function testDbConnection() {
         SELECT * FROM _pos_customers_base 
         WHERE restaurant_id = current_restaurant_id() WITH CHECK OPTION
       `);
-      
       await pool.query(`DROP TRIGGER IF EXISTS t_pos_customers_insert`);
       await pool.query(`
         CREATE TRIGGER t_pos_customers_insert BEFORE INSERT ON _pos_customers_base 
+        FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id)
+      `);
+    }
+
+    // Check and create _pos_face_descriptors_base table if it doesn't exist
+    const [faceTableExists] = await pool.query(`
+      SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+      WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '_pos_face_descriptors_base'
+    `);
+    if (faceTableExists.length === 0) {
+      console.log('[Startup] Creating _pos_face_descriptors_base table, view, and trigger...');
+      await pool.query(`
+        CREATE TABLE IF NOT EXISTS _pos_face_descriptors_base (
+          staff_id INT NOT NULL,
+          restaurant_id INT NOT NULL,
+          descriptor LONGTEXT NOT NULL,
+          photo LONGTEXT DEFAULT NULL,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+          PRIMARY KEY (restaurant_id, staff_id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+      
+      await pool.query(`
+        CREATE OR REPLACE VIEW pos_face_descriptors AS 
+        SELECT * FROM _pos_face_descriptors_base 
+        WHERE restaurant_id = current_restaurant_id() WITH CHECK OPTION
+      `);
+      
+      await pool.query(`DROP TRIGGER IF EXISTS t_pos_face_descriptors_insert`);
+      await pool.query(`
+        CREATE TRIGGER t_pos_face_descriptors_insert BEFORE INSERT ON _pos_face_descriptors_base 
         FOR EACH ROW SET NEW.restaurant_id = IF(NEW.restaurant_id IS NULL OR NEW.restaurant_id = 0, @current_restaurant_id, NEW.restaurant_id)
       `);
     }

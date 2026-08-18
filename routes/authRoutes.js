@@ -17,5 +17,6 @@ router.get('/rider/attendance', authenticateJWT, requireRider, authController.ge
 router.get('/rider/salary', authenticateJWT, requireRider, authController.getRiderSalary);
 router.get('/rider/profile', authenticateJWT, requireRider, authController.getRiderProfile);
 router.get('/verify-license', authController.verifyLicense);
+router.post('/verify-license', authController.verifyLicense);
 
 module.exports = router;

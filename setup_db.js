@@ -221,6 +221,9 @@ async function run() {
       salary_amount       DOUBLE       DEFAULT 0,
       status              VARCHAR(50)  DEFAULT 'Active',
       permissions         TEXT         DEFAULT NULL,
+      assigned_categories TEXT         DEFAULT NULL,
+      assigned_items      TEXT         DEFAULT NULL,
+      assigned_order_types TEXT        DEFAULT NULL,
       daily_duty_hours    INT          DEFAULT 8,
       attendance_pin_hash VARCHAR(255) DEFAULT NULL,
       fingerprint_template TEXT         DEFAULT NULL,
@@ -648,8 +651,21 @@ async function run() {
   await addCol('_pos_orders_base',     'rider_name',         'VARCHAR(255) DEFAULT NULL');
   await addCol('_pos_orders_base',     'edit_count',         'INT DEFAULT 0');
   await addCol('_pos_orders_base',     'is_return',          'TINYINT DEFAULT 0');
+  await addCol('_pos_orders_base',     'return_reason',      'TEXT DEFAULT NULL');
+  await addCol('_pos_orders_base',     'return_type',        "VARCHAR(50) DEFAULT NULL");
+  await addCol('_pos_orders_base',     'payment_received',   'TINYINT DEFAULT 0');
+  await addCol('_pos_orders_base',     'payment_received_at','DATETIME DEFAULT NULL');
+  await addCol('_pos_orders_base',     'payment_received_by','INT DEFAULT NULL');
+  await addCol('_pos_orders_base',     'payment_method',     "VARCHAR(50) DEFAULT 'Cash'");
+  await addCol('_pos_orders_base',     'is_deleted',         'TINYINT DEFAULT 0');
+  await addCol('_pos_orders_base',     'deleted_at',         'DATETIME DEFAULT NULL');
   await addCol('_pos_order_items_base','deal_id',            'INT DEFAULT NULL');
+  await addCol('_pos_order_items_base','is_deleted',         'TINYINT DEFAULT 0');
+  await addCol('_pos_order_items_base','deleted_at',         'DATETIME DEFAULT NULL');
   await addCol('_pos_staff_base',  'permissions',        'TEXT DEFAULT NULL');
+  await addCol('_pos_staff_base',  'assigned_categories', 'TEXT DEFAULT NULL');
+  await addCol('_pos_staff_base',  'assigned_items',      'TEXT DEFAULT NULL');
+  await addCol('_pos_staff_base',  'assigned_order_types', 'TEXT DEFAULT NULL');
   await addCol('_pos_staff_base',  'role_id',            'INT DEFAULT NULL');
   await addCol('_pos_staff_base',  'attendance_pin_hash', 'VARCHAR(255) DEFAULT NULL');
   await addCol('_pos_staff_base',  'fingerprint_template', 'TEXT DEFAULT NULL');

@@ -257,7 +257,7 @@ const createTask = async (req, res) => {
                AND (a.staff_id = r.id OR a.staff_id IN (
                  SELECT s.id FROM _pos_staff_base s WHERE s.username = r.username AND s.restaurant_id = r.restaurant_id
                ))
-               AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+               AND a.clock_out IS NULL
                AND (a.is_deleted IS NULL OR a.is_deleted = 0)
            )`,
         [restaurantId]

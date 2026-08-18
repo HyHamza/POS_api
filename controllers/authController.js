@@ -296,7 +296,7 @@ async function isRiderDutyActive(riderId, restaurantId) {
        LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
        LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
        WHERE a.restaurant_id = ?
-         AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+         AND a.clock_out IS NULL
          AND (a.is_deleted IS NULL OR a.is_deleted = 0)
          AND (r.id = ? OR a.staff_id = ?)
        LIMIT 1`,
@@ -325,7 +325,7 @@ const getRiderDutyStatus = async (req, res) => {
          LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
          LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
          WHERE a.restaurant_id = ?
-           AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+           AND a.clock_out IS NULL
            AND (a.is_deleted IS NULL OR a.is_deleted = 0)
            AND (r.id = ? OR a.staff_id = ?)
          ORDER BY a.id DESC LIMIT 1`,
@@ -393,7 +393,17 @@ const riderLogout = async (req, res) => {
 };
 
 const verifyLicense = async (req, res) => {
-  const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.query.licenseKey;
+  let licenseKey = req.headers['x-license-key'] || req.query.license_key || req.query.licenseKey || req.body?.licenseKey || req.body?.license_key;
+
+  if (!licenseKey && req.headers.cookie) {
+    const cookies = req.headers.cookie.split(';').map(c => c.trim());
+    for (const c of cookies) {
+      if (c.startsWith('pos_license_key=')) {
+        licenseKey = decodeURIComponent(c.substring('pos_license_key='.length));
+        break;
+      }
+    }
+  }
 
   if (!licenseKey) {
     return res.status(400).json({
@@ -429,8 +439,9 @@ const verifyLicense = async (req, res) => {
     }
 
     // Lookup all staff details for local SQLite seeding
+    // Lookup all staff details for terminal login
     const [staffRows] = await pool.query(
-      'SELECT username, pin_hash, name, role, phone, email, status FROM _pos_staff_base WHERE restaurant_id = ?',
+      'SELECT id, username, pin_hash, name, role, phone, email, status FROM _pos_staff_base WHERE restaurant_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)',
       [id]
     );
 
@@ -446,6 +457,7 @@ const verifyLicense = async (req, res) => {
         restaurantId: id,
         restaurant_id: id,
         staffList: staffRows.map(s => ({
+          id: s.id,
           username: s.username,
           pinHash: s.pin_hash,
           name: s.name,
@@ -561,7 +573,7 @@ const staffLogin = async (req, res) => {
     const [attRows] = await pool.query(
       `SELECT id, clock_in FROM _pos_attendance_base 
        WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
-         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+         AND clock_out IS NULL
          AND (is_deleted IS NULL OR is_deleted = 0)
        ORDER BY id DESC LIMIT 1`,
       [staff.id, staff.username, restaurantId]
@@ -676,7 +688,7 @@ const unifiedLogin = async (req, res) => {
         const [attRows] = await pool.query(
           `SELECT id, clock_in FROM _pos_attendance_base 
            WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
-             AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+             AND clock_out IS NULL
              AND (is_deleted IS NULL OR is_deleted = 0)
            ORDER BY id DESC LIMIT 1`,
           [staff.id, staff.username, restaurantId]
@@ -753,7 +765,7 @@ const unifiedLogin = async (req, res) => {
                  LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
                  LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
                  WHERE a.restaurant_id = ?
-                   AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+                   AND a.clock_out IS NULL
                    AND (a.is_deleted IS NULL OR a.is_deleted = 0)
                    AND (r.id = ? OR a.staff_id = ?)
                  ORDER BY a.id DESC LIMIT 1`,
@@ -874,7 +886,7 @@ const riderClockIn = async (req, res) => {
     const [openAttendance] = await pool.query(
       `SELECT id, clock_in FROM _pos_attendance_base 
        WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
-         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')
+         AND clock_out IS NULL
          AND (is_deleted IS NULL OR is_deleted = 0)
        ORDER BY id DESC LIMIT 1`,
       [staffId, riderId, restaurantId]
@@ -958,7 +970,7 @@ const riderClockOut = async (req, res) => {
       `UPDATE _pos_attendance_base 
        SET clock_out = NOW() 
        WHERE (staff_id = ? OR staff_id = ?) AND restaurant_id = ?
-         AND (clock_out IS NULL OR clock_out = '' OR clock_out = 'null')`,
+         AND clock_out IS NULL`,
       [staffId || riderId, riderId, restaurantId]
     );
 

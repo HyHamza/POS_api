@@ -37,7 +37,8 @@ const authenticateJWT = (req, res, next) => {
 };
 
 const requireAdmin = (req, res, next) => {
-  if (!req.user || req.user.role !== 'admin') {
+  const role = (req.user?.role || '').toLowerCase();
+  if (!req.user || (role !== 'admin' && role !== 'super_admin' && role !== 'superadmin')) {
     return res.status(403).json({
       success: false,
       data: null,
@@ -64,29 +65,25 @@ const checkPermission = (permission) => {
       return res.status(401).json({ success: false, error: 'Unauthorized.' });
     }
 
-    // CRITICAL FIX: Bypass permission checks for riders entirely
-    // Riders don't have permissions in the staff table, they have their own access rules
-    if (req.user.role === 'rider') {
-      console.log(`[Auth] Rider ${req.user.id} bypassing permission check: ${permission}`);
+    const role = (req.user?.role || '').toLowerCase();
+    const id = req.user?.id;
+    const restaurantId = req.user?.restaurantId || req.user?.restaurant_id;
+
+    // Riders bypass
+    if (role === 'rider') {
       return next();
     }
 
-    // Bypass for super admin
-    if (req.user.role === 'super_admin') {
+    // Super Admin bypass
+    if (role === 'super_admin' || role === 'superadmin') {
       return next();
     }
 
-    // Bypass for trusted POS client gateway
-    if (req.user.role === 'admin' && req.user.username === 'pos_client') {
+    // Admin bypass (Tenant Admin & POS Client)
+    if (role === 'admin') {
       return next();
     }
 
-    // Tenant admin user login bypass
-    if (req.user.role === 'admin') {
-      return next();
-    }
-
-    const { id, restaurantId } = req.user;
     if (!id || !restaurantId) {
       return res.status(403).json({ success: false, error: 'Forbidden. Invalid context.' });
     }

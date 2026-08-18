@@ -14,13 +14,28 @@ const tenantMiddleware = async (req, res, next) => {
     return next();
   }
 
-  const licenseKey = req.headers['x-license-key'] || req.query.license_key;
+  // Extract license key from headers, cookies, query, or body
+  let licenseKey = req.headers['x-license-key'] || req.query.license_key || req.query.licenseKey;
+  
+  if (!licenseKey && req.headers.cookie) {
+    const cookies = req.headers.cookie.split(';').map(c => c.trim());
+    for (const c of cookies) {
+      if (c.startsWith('pos_license_key=')) {
+        licenseKey = decodeURIComponent(c.substring('pos_license_key='.length));
+        break;
+      }
+    }
+  }
+
+  if (!licenseKey && req.body && (req.body.license_key || req.body.licenseKey)) {
+    licenseKey = req.body.license_key || req.body.licenseKey;
+  }
 
   if (!licenseKey) {
     return res.status(400).json({
       success: false,
       data: null,
-      error: 'x-license-key header or license_key query parameter is required.'
+      error: 'x-license-key header, pos_license_key cookie, or license_key query parameter is required.'
     });
   }
 

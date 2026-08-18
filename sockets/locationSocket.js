@@ -29,7 +29,7 @@ async function isRiderClockedIn(riderId, restaurantId) {
        LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
        LEFT JOIN _riders_base r ON (s.username = r.username OR a.staff_id = r.id) AND r.restaurant_id = a.restaurant_id
        WHERE a.restaurant_id = ?
-         AND (a.clock_out IS NULL OR a.clock_out = '' OR a.clock_out = 'null')
+         AND a.clock_out IS NULL
          AND (a.is_deleted IS NULL OR a.is_deleted = 0)
          AND (r.id = ? OR a.staff_id = ?)
        LIMIT 1`,
@@ -50,9 +50,18 @@ module.exports = (io) => {
 
   // Handshake middleware to authenticate the license key first
   io.use(async (socket, next) => {
-    const licenseKey = socket.handshake.query.licenseKey || socket.handshake.headers['x-license-key'];
+    let licenseKey = socket.handshake.auth?.licenseKey || socket.handshake.query?.licenseKey || socket.handshake.headers?.['x-license-key'];
+    if (!licenseKey && socket.handshake.headers?.cookie) {
+      const cookies = socket.handshake.headers.cookie.split(';').map(c => c.trim());
+      for (const c of cookies) {
+        if (c.startsWith('pos_license_key=')) {
+          licenseKey = decodeURIComponent(c.substring('pos_license_key='.length));
+          break;
+        }
+      }
+    }
     if (!licenseKey) {
-      return next(new Error('Authentication error: licenseKey query parameter or x-license-key header is required.'));
+      return next(new Error('Authentication error: licenseKey query parameter, auth payload, cookie or x-license-key header is required.'));
     }
     try {
       const result = await resolvePoolForLicense(licenseKey);
