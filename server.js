@@ -68,10 +68,12 @@ const corsOptions = {
     callback(new Error('Not allowed by CORS'));
   },
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-license-key', 'X-Requested-With', 'Accept', 'Origin'],
   credentials: true
 };
 
 app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 app.use(helmet({
   contentSecurityPolicy: false // Disable CSP for easier local super admin panel UI load
 }));
