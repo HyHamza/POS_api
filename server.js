@@ -87,6 +87,17 @@ app.use((req, res, next) => {
   next();
 });
 
+// Public root & health check endpoint (unaffected by tenantMiddleware)
+app.get('/', (req, res) => {
+  res.json({
+    status: 'online',
+    service: 'RestaurantOS POS Cloud API',
+    version: '1.0.1',
+    timestamp: new Date().toISOString()
+  });
+});
+app.use('/api/health', healthRoutes);
+
 // Super Admin Static hosting and API routes (unaffected by tenantMiddleware)
 app.use('/api/super-admin', superAdminRoutes);
 
@@ -115,11 +126,14 @@ app.use('/api/riders', riderRoutes);
 app.use('/api/tasks', taskRoutes);
 app.use('/api/pos', posRoutes);
 app.use('/api/deals', dealRoutes);
-app.use('/api/health', healthRoutes);
 app.use('/api/reports', reportRoutes);
 
 // Database connection sanity test & auto schema generation on startup
 async function testDbConnection() {
+  if (process.env.VERCEL) {
+    console.log('[Startup] Running in Vercel serverless environment. Skipping DDL migrations on cold start.');
+    return;
+  }
   try {
     const [rows] = await pool.query('SELECT 1');
     console.log(`[${new Date().toISOString()}] Database pool connected successfully.`);
@@ -709,8 +723,7 @@ async function testDbConnection() {
 
 
   } catch (err) {
-    console.error(`[${new Date().toISOString()}] Database connection or migration error on startup:`, err);
-    process.exit(1);
+    console.error(`[${new Date().toISOString()}] Database connection warning on startup:`, err.message);
   }
 }
 testDbConnection();
@@ -776,7 +789,7 @@ app.get = function (name, ...rest) {
 require('./sockets/locationSocket')(io);
 
 // Daily midnight cron job to prune location history older than 7 days (runs on base table)
-cron.schedule('0 0 * * *', async () => {
+const runRetentionPrune = async () => {
   console.log(`[${new Date().toISOString()}] Running daily midnight retention pruning...`);
   try {
     const [result] = await pool.query(
@@ -786,10 +799,10 @@ cron.schedule('0 0 * * *', async () => {
   } catch (err) {
     console.error(`[${new Date().toISOString()}] Pruning failed:`, err);
   }
-});
+};
 
 // ─── Staleness Watchdog (Unified Database Base Table Scan) ────────────────────
-setInterval(async () => {
+const runRiderWatchdog = async () => {
   try {
     const [staleRiders] = await pool.query(`
       SELECT r.id, r.status, r.restaurant_id, rest.license_key
@@ -820,10 +833,10 @@ setInterval(async () => {
   } catch (err) {
     console.error('[Watchdog] Error during staleness check:', err);
   }
-}, 15000); // Run every 15 seconds
+};
 
 // ─── Automated Database Maintenance & Bloat Prevention (Runs Daily at 3:00 AM) ───
-cron.schedule('0 3 * * *', async () => {
+const runDailyCleanup = async () => {
   try {
     console.log('[Maintenance] Running daily cloud database cleanup...');
     // 1. Prune system logs older than 7 days
@@ -838,7 +851,7 @@ cron.schedule('0 3 * * *', async () => {
   } catch (mErr) {
     console.error('[Maintenance] Daily cleanup error:', mErr.message);
   }
-});
+};
 
 // JSON 404 Route handler
 app.use((req, res, next) => {
@@ -861,42 +874,51 @@ app.use((err, req, res, next) => {
 
 const PORT = process.env.PORT || 3000;
 
-// Attach Custom Strict Tenant WebSocket Push Layer
-const webSocketBroadcaster = require('./sockets/WebSocketBroadcaster');
-webSocketBroadcaster.attach(server);
+// In standalone / continuous server mode (Render, Railway, VPS, localhost), start background timers and WebSockets
+if (!process.env.VERCEL) {
+  // Attach Custom Strict Tenant WebSocket Push Layer
+  const webSocketBroadcaster = require('./sockets/WebSocketBroadcaster');
+  webSocketBroadcaster.attach(server);
 
-// Listen on 0.0.0.0 for external network access
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[${new Date().toISOString()}] Server running on http://0.0.0.0:${PORT}`);
-});
+  // Background Timers & Cron Jobs
+  cron.schedule('0 0 * * *', runRetentionPrune);
+  setInterval(runRiderWatchdog, 15000);
+  cron.schedule('0 3 * * *', runDailyCleanup);
 
-// Graceful Shutdown implementation
-const shutdown = () => {
-  console.log(`[${new Date().toISOString()}] Shutting down server gracefully...`);
-
-  webSocketBroadcaster.shutdown();
-
-  server.close(() => {
-    console.log('HTTP and Socket server closed.');
-
-    pool.end().then(() => {
-      console.log('Database pool closed.');
-      process.exit(0);
-    }).catch(err => {
-      console.error('Error closing database pool:', err);
-      process.exit(1);
-    });
+  // Listen on 0.0.0.0 for external network access
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[${new Date().toISOString()}] Server running on http://0.0.0.0:${PORT}`);
   });
 
-  setTimeout(() => {
-    console.error('Forcefully terminating server.');
-    process.exit(1);
-  }, 10000);
-};
+  // Graceful Shutdown implementation
+  const shutdown = () => {
+    console.log(`[${new Date().toISOString()}] Shutting down server gracefully...`);
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+    webSocketBroadcaster.shutdown();
 
-module.exports = server;
-// Touch to restart server for migration v3 HLC columns update (v3)
+    server.close(() => {
+      console.log('HTTP and Socket server closed.');
+
+      pool.end().then(() => {
+        console.log('Database pool closed.');
+        process.exit(0);
+      }).catch(err => {
+        console.error('Error closing database pool:', err);
+        process.exit(1);
+      });
+    });
+
+    setTimeout(() => {
+      console.error('Forcefully terminating server.');
+      process.exit(1);
+    }, 10000);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+}
+
+app.server = server;
+module.exports = app;
+
 
