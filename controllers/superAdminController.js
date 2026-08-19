@@ -688,12 +688,31 @@ const getRestaurantsOverview = async (req, res) => {
   }
 };
 
+// Helper to ensure custom_view_config column exists on _pos_staff_base
+let isCustomViewColumnChecked = false;
+async function ensureCustomViewColumn() {
+  if (isCustomViewColumnChecked) return true;
+  try {
+    const [cols] = await mainPool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
+    if (cols.length === 0) {
+      await mainPool.query("ALTER TABLE _pos_staff_base ADD COLUMN custom_view_config TEXT DEFAULT NULL");
+    }
+    isCustomViewColumnChecked = true;
+    return true;
+  } catch (err) {
+    console.warn('[superAdminController] custom_view_config column check warning:', err.message);
+    return false;
+  }
+}
+
 /**
  * Get all employees across all restaurants
  */
 const getAllEmployees = async (req, res) => {
   try {
     const { restaurant_id, role, status } = req.query;
+    const hasCol = await ensureCustomViewColumn();
+    const customViewField = hasCol ? 's.custom_view_config,' : 'NULL as custom_view_config,';
     
     let query = `
       SELECT 
@@ -707,7 +726,7 @@ const getAllEmployees = async (req, res) => {
         s.salary_type,
         s.salary_amount,
         s.status,
-        s.custom_view_config,
+        ${customViewField}
         s.created_at,
         r.name as restaurant_name,
         r.id as restaurant_id,
@@ -748,7 +767,7 @@ const getAllEmployees = async (req, res) => {
     console.error('Failed to fetch employees:', err);
     return res.status(500).json({
       success: false,
-      error: 'Failed to fetch employees data.'
+      error: 'Failed to fetch employees data: ' + err.message
     });
   }
 };
@@ -1359,8 +1378,11 @@ const getAllCustomers = async (req, res) => {
 const getStaffCustomView = async (req, res) => {
   try {
     const { id } = req.params;
+    const hasCol = await ensureCustomViewColumn();
+    const customViewField = hasCol ? 's.custom_view_config,' : 'NULL as custom_view_config,';
+
     const [rows] = await mainPool.query(`
-      SELECT s.id, s.name, s.username, s.role, s.restaurant_id, s.custom_view_config, r.name as restaurant_name
+      SELECT s.id, s.name, s.username, s.role, s.restaurant_id, ${customViewField} r.name as restaurant_name
       FROM _pos_staff_base s
       JOIN restaurants r ON s.restaurant_id = r.id
       WHERE s.id = ?
@@ -1390,7 +1412,7 @@ const getStaffCustomView = async (req, res) => {
     console.error('Failed to fetch staff custom view:', err);
     return res.status(500).json({
       success: false,
-      error: 'Failed to fetch custom view configuration.'
+      error: 'Failed to fetch custom view configuration: ' + err.message
     });
   }
 };
