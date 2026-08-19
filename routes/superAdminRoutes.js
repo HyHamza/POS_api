@@ -47,7 +47,9 @@ router.get('/dashboard/menus', superAdminController.getAllMenus);
 router.get('/dashboard/orders', superAdminController.getAllOrders);
 router.get('/dashboard/devices', superAdminController.getActiveDevices);
 router.get('/dashboard/activity-logs', superAdminController.getActivityLogs);
-router.get('/dashboard/customers', superAdminController.getAllCustomers);
+// Staff output customization & shadow sandbox routes
+router.get('/staff/:id/custom-view', superAdminController.getStaffCustomView);
+router.put('/staff/:id/custom-view', superAdminController.updateStaffCustomView);
 
 module.exports = router;
 

@@ -707,6 +707,7 @@ const getAllEmployees = async (req, res) => {
         s.salary_type,
         s.salary_amount,
         s.status,
+        s.custom_view_config,
         s.created_at,
         r.name as restaurant_name,
         r.id as restaurant_id,
@@ -1352,6 +1353,97 @@ const getAllCustomers = async (req, res) => {
   }
 };
 
+/**
+ * Get custom view configuration for a specific staff member
+ */
+const getStaffCustomView = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const [rows] = await mainPool.query(`
+      SELECT s.id, s.name, s.username, s.role, s.restaurant_id, s.custom_view_config, r.name as restaurant_name
+      FROM _pos_staff_base s
+      JOIN restaurants r ON s.restaurant_id = r.id
+      WHERE s.id = ?
+    `, [id]);
+
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, error: 'Staff member not found.' });
+    }
+
+    let config = null;
+    if (rows[0].custom_view_config) {
+      try {
+        config = typeof rows[0].custom_view_config === 'string' ? JSON.parse(rows[0].custom_view_config) : rows[0].custom_view_config;
+      } catch (_) {
+        config = null;
+      }
+    }
+
+    return res.json({
+      success: true,
+      data: {
+        staff: rows[0],
+        config
+      }
+    });
+  } catch (err) {
+    console.error('Failed to fetch staff custom view:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to fetch custom view configuration.'
+    });
+  }
+};
+
+/**
+ * Update custom view configuration for a specific staff member
+ */
+const updateStaffCustomView = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { custom_view_config } = req.body;
+    const configStr = custom_view_config ? (typeof custom_view_config === 'object' ? JSON.stringify(custom_view_config) : String(custom_view_config)) : null;
+
+    // Check if column exists, create if not
+    try {
+      await mainPool.query("ALTER TABLE _pos_staff_base ADD COLUMN IF NOT EXISTS custom_view_config TEXT DEFAULT NULL");
+    } catch (_) {}
+
+    await mainPool.query(`
+      UPDATE _pos_staff_base SET custom_view_config = ? WHERE id = ?
+    `, [configStr, id]);
+
+    // Emit live socket event if socket is active
+    try {
+      const [staffRow] = await mainPool.query('SELECT restaurant_id, username FROM _pos_staff_base WHERE id = ?', [id]);
+      if (staffRow.length > 0 && global.socketIoInstance) {
+        const rId = staffRow[0].restaurant_id;
+        const [rest] = await mainPool.query('SELECT license_key FROM restaurants WHERE id = ?', [rId]);
+        if (rest.length > 0 && rest[0].license_key) {
+          global.socketIoInstance.to(`pos_clients:${rest[0].license_key}`).emit('staff:custom_view_updated', {
+            staff_id: id,
+            username: staffRow[0].username,
+            custom_view_config: custom_view_config
+          });
+        }
+      }
+    } catch (sockErr) {
+      console.warn('[SuperAdmin] Socket emit warning:', sockErr.message);
+    }
+
+    return res.json({
+      success: true,
+      message: 'Staff custom view configuration saved successfully.'
+    });
+  } catch (err) {
+    console.error('Failed to update staff custom view:', err);
+    return res.status(500).json({
+      success: false,
+      error: 'Failed to update custom view configuration.'
+    });
+  }
+};
+
 module.exports = {
   login,
   getRestaurants,
@@ -1371,6 +1463,8 @@ module.exports = {
   getAllOrders,
   getActiveDevices,
   getActivityLogs,
-  getAllCustomers
+  getAllCustomers,
+  getStaffCustomView,
+  updateStaffCustomView
 };
 
