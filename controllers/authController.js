@@ -1219,13 +1219,17 @@ const getStaffCustomViews = async (req, res) => {
   try {
     const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.body?.license_key;
     if (!licenseKey) {
-      return res.status(400).json({ success: false, error: 'License key is required' });
+      return res.status(400).json({ success: false, error: 'License key is required.' });
     }
-    const resolved = await resolveTenantPool(licenseKey);
-    if (!resolved || !resolved.pool) {
-      return res.status(403).json({ success: false, error: 'Invalid license key' });
+    const [restRows] = await pool.query(
+      'SELECT id FROM restaurants WHERE license_key = ?',
+      [licenseKey]
+    );
+    if (restRows.length === 0) {
+      return res.status(404).json({ success: false, error: 'License key not found.' });
     }
-    const { pool, restaurantId } = resolved;
+    const restaurantId = restRows[0].id;
+
     let hasCustomViewCol = false;
     try {
       const [cols] = await pool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
