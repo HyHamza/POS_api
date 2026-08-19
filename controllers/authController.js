@@ -1215,6 +1215,47 @@ const getRiderProfile = async (req, res) => {
   }
 };
 
+const getStaffCustomViews = async (req, res) => {
+  try {
+    const licenseKey = req.headers['x-license-key'] || req.query.license_key || req.body?.license_key;
+    if (!licenseKey) {
+      return res.status(400).json({ success: false, error: 'License key is required' });
+    }
+    const resolved = await resolveTenantPool(licenseKey);
+    if (!resolved || !resolved.pool) {
+      return res.status(403).json({ success: false, error: 'Invalid license key' });
+    }
+    const { pool, restaurantId } = resolved;
+    let hasCustomViewCol = false;
+    try {
+      const [cols] = await pool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
+      hasCustomViewCol = cols.length > 0;
+    } catch (_) {}
+    if (!hasCustomViewCol) {
+      return res.json({ success: true, data: [] });
+    }
+    const [rows] = await pool.query(
+      `SELECT id, username, custom_view_config FROM _pos_staff_base WHERE restaurant_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
+      [restaurantId]
+    );
+    const data = rows.map(r => {
+      let cfg = null;
+      if (r.custom_view_config) {
+        try { cfg = typeof r.custom_view_config === 'string' ? JSON.parse(r.custom_view_config) : r.custom_view_config; } catch (_) { cfg = null; }
+      }
+      return {
+        id: r.id,
+        username: r.username,
+        custom_view_config: cfg
+      };
+    });
+    return res.json({ success: true, data });
+  } catch (err) {
+    console.error('getStaffCustomViews error:', err);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+};
+
 module.exports = {
   riderLogin,
   adminLogin,
@@ -1229,5 +1270,6 @@ module.exports = {
   getRiderSalary,
   getRiderProfile,
   verifyLicense,
+  getStaffCustomViews,
   isRiderDutyActive
 };

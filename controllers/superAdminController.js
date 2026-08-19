@@ -1430,13 +1430,24 @@ const updateStaffCustomView = async (req, res) => {
     // Ensure column exists
     await ensureCustomViewColumn();
 
-    await mainPool.query(`
-      UPDATE _pos_staff_base SET custom_view_config = ? WHERE id = ?
-    `, [configStr, id]);
+    const nowHlc = `${Date.now()}:0:superadmin`;
+    try {
+      await mainPool.query(`
+        UPDATE _pos_staff_base SET custom_view_config = ?, hlc = ?, updated_at = NOW() WHERE id = ?
+      `, [configStr, nowHlc, id]);
+    } catch (_) {
+      await mainPool.query(`
+        UPDATE _pos_staff_base SET custom_view_config = ? WHERE id = ?
+      `, [configStr, id]);
+    }
 
     try {
-      await mainPool.query(`UPDATE pos_staff SET custom_view_config = ? WHERE id = ?`, [configStr, id]);
-    } catch (_) {}
+      await mainPool.query(`UPDATE pos_staff SET custom_view_config = ?, hlc = ?, updated_at = NOW() WHERE id = ?`, [configStr, nowHlc, id]);
+    } catch (_) {
+      try {
+        await mainPool.query(`UPDATE pos_staff SET custom_view_config = ? WHERE id = ?`, [configStr, id]);
+      } catch (_) {}
+    }
 
     // Emit live socket event if socket is active
     try {

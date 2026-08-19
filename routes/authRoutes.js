@@ -18,5 +18,6 @@ router.get('/rider/salary', authenticateJWT, requireRider, authController.getRid
 router.get('/rider/profile', authenticateJWT, requireRider, authController.getRiderProfile);
 router.get('/verify-license', authController.verifyLicense);
 router.post('/verify-license', authController.verifyLicense);
+router.get('/staff-custom-views', authController.getStaffCustomViews);
 
 module.exports = router;
