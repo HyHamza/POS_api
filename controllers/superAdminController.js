@@ -1427,13 +1427,16 @@ const updateStaffCustomView = async (req, res) => {
     const configStr = custom_view_config ? (typeof custom_view_config === 'object' ? JSON.stringify(custom_view_config) : String(custom_view_config)) : null;
 
     // Check if column exists, create if not
-    try {
-      await mainPool.query("ALTER TABLE _pos_staff_base ADD COLUMN IF NOT EXISTS custom_view_config TEXT DEFAULT NULL");
-    } catch (_) {}
+    // Ensure column exists
+    await ensureCustomViewColumn();
 
     await mainPool.query(`
       UPDATE _pos_staff_base SET custom_view_config = ? WHERE id = ?
     `, [configStr, id]);
+
+    try {
+      await mainPool.query(`UPDATE pos_staff SET custom_view_config = ? WHERE id = ?`, [configStr, id]);
+    } catch (_) {}
 
     // Emit live socket event if socket is active
     try {
@@ -1442,11 +1445,18 @@ const updateStaffCustomView = async (req, res) => {
         const rId = staffRow[0].restaurant_id;
         const [rest] = await mainPool.query('SELECT license_key FROM restaurants WHERE id = ?', [rId]);
         if (rest.length > 0 && rest[0].license_key) {
-          global.socketIoInstance.to(`pos_clients:${rest[0].license_key}`).emit('staff:custom_view_updated', {
+          const lKey = rest[0].license_key;
+          const io = global.socketIoInstance;
+          const payload = {
             staff_id: id,
             username: staffRow[0].username,
             custom_view_config: custom_view_config
-          });
+          };
+          io.to(`pos_clients:${lKey}`).emit('staff:custom_view_updated', payload);
+          io.to(`admin:${lKey}`).emit('staff:custom_view_updated', payload);
+          io.to(`web_clients:${lKey}`).emit('staff:custom_view_updated', payload);
+          io.to(`pos:${lKey}`).emit('staff:custom_view_updated', payload);
+          io.emit('staff:custom_view_updated', payload); // global fallback
         }
       }
     } catch (sockErr) {
@@ -1461,7 +1471,7 @@ const updateStaffCustomView = async (req, res) => {
     console.error('Failed to update staff custom view:', err);
     return res.status(500).json({
       success: false,
-      error: 'Failed to update custom view configuration.'
+      error: 'Failed to update custom view configuration: ' + err.message
     });
   }
 };

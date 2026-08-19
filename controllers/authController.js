@@ -440,8 +440,15 @@ const verifyLicense = async (req, res) => {
 
     // Lookup all staff details for local SQLite seeding
     // Lookup all staff details for terminal login
+    let hasCustomViewCol = false;
+    try {
+      const [cols] = await pool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
+      hasCustomViewCol = cols.length > 0;
+    } catch (_) {}
+    const customViewSelect = hasCustomViewCol ? 'custom_view_config,' : 'NULL as custom_view_config,';
+
     const [staffRows] = await pool.query(
-      'SELECT id, username, pin_hash, name, role, phone, email, status FROM _pos_staff_base WHERE restaurant_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)',
+      `SELECT id, username, pin_hash, name, role, phone, email, status, ${customViewSelect} permissions, assigned_categories, assigned_items, assigned_order_types FROM _pos_staff_base WHERE restaurant_id = ? AND (is_deleted = 0 OR is_deleted IS NULL)`,
       [id]
     );
 
@@ -456,16 +463,23 @@ const verifyLicense = async (req, res) => {
         restaurantName: name,
         restaurantId: id,
         restaurant_id: id,
-        staffList: staffRows.map(s => ({
-          id: s.id,
-          username: s.username,
-          pinHash: s.pin_hash,
-          name: s.name,
-          role: s.role,
-          phone: s.phone,
-          email: s.email,
-          status: s.status
-        }))
+        staffList: staffRows.map(s => {
+          let cvc = null;
+          if (s.custom_view_config) {
+            try { cvc = typeof s.custom_view_config === 'string' ? JSON.parse(s.custom_view_config) : s.custom_view_config; } catch (_) { cvc = null; }
+          }
+          return {
+            id: s.id,
+            username: s.username,
+            pinHash: s.pin_hash,
+            name: s.name,
+            role: s.role,
+            phone: s.phone,
+            email: s.email,
+            status: s.status,
+            custom_view_config: cvc
+          };
+        })
       },
       error: finalStatus === 'active' ? null : `License key is ${finalStatus}.`
     };
@@ -524,8 +538,16 @@ const staffLogin = async (req, res) => {
     const crypto = require('crypto');
     const inputPinHash = crypto.createHash('sha256').update(String(credential).trim()).digest('hex');
 
+    let hasCustomViewCol = false;
+    try {
+      const [cols] = await pool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
+      hasCustomViewCol = cols.length > 0;
+    } catch (_) {}
+    const customViewSelect = hasCustomViewCol ? 'custom_view_config,' : 'NULL as custom_view_config,';
+
     const [rows] = await pool.query(
       `SELECT id, restaurant_id, name, username, pin_hash, role_id, role, status, permissions, 
+              ${customViewSelect}
               assigned_categories, assigned_items, assigned_order_types 
        FROM _pos_staff_base 
        WHERE username = ? AND restaurant_id = ?`,
@@ -569,6 +591,15 @@ const staffLogin = async (req, res) => {
       }
     }
 
+    let parsedCustomView = null;
+    if (staff.custom_view_config) {
+      try {
+        parsedCustomView = typeof staff.custom_view_config === 'string' ? JSON.parse(staff.custom_view_config) : staff.custom_view_config;
+      } catch (_) {
+        parsedCustomView = null;
+      }
+    }
+
     // Check attendance status (any active open session)
     const [attRows] = await pool.query(
       `SELECT id, clock_in FROM _pos_attendance_base 
@@ -605,6 +636,7 @@ const staffLogin = async (req, res) => {
           role: staff.role,
           status: staff.status,
           permissions: parsedPermissions,
+          custom_view_config: parsedCustomView,
           isClockedIn,
           attendanceRecord,
           assigned_categories: staff.assigned_categories,
@@ -665,8 +697,16 @@ const unifiedLogin = async (req, res) => {
     const crypto = require('crypto');
     const inputPinHash = crypto.createHash('sha256').update(cleanCred).digest('hex');
 
+    let hasCustomViewCol = false;
+    try {
+      const [cols] = await pool.query("SHOW COLUMNS FROM _pos_staff_base LIKE 'custom_view_config'");
+      hasCustomViewCol = cols.length > 0;
+    } catch (_) {}
+    const customViewSelect = hasCustomViewCol ? 'custom_view_config,' : 'NULL as custom_view_config,';
+
     const [staffRows] = await pool.query(
       `SELECT id, restaurant_id, name, username, pin_hash, role_id, role, status, permissions,
+              ${customViewSelect}
               assigned_categories, assigned_items, assigned_order_types
        FROM _pos_staff_base
        WHERE username = ? AND restaurant_id = ?`,
@@ -682,6 +722,15 @@ const unifiedLogin = async (req, res) => {
             parsedPermissions = typeof staff.permissions === 'string' ? JSON.parse(staff.permissions) : staff.permissions;
           } catch (_) {
             parsedPermissions = [];
+          }
+        }
+
+        let parsedCustomView = null;
+        if (staff.custom_view_config) {
+          try {
+            parsedCustomView = typeof staff.custom_view_config === 'string' ? JSON.parse(staff.custom_view_config) : staff.custom_view_config;
+          } catch (_) {
+            parsedCustomView = null;
           }
         }
 
@@ -720,6 +769,7 @@ const unifiedLogin = async (req, res) => {
               role: staff.role,
               status: staff.status,
               permissions: parsedPermissions,
+              custom_view_config: parsedCustomView,
               isClockedIn,
               attendanceRecord: isClockedIn ? attRows[0] : null,
               assigned_categories: staff.assigned_categories,

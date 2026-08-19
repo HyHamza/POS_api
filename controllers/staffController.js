@@ -42,6 +42,7 @@ const getAllStaff = async (req, res) => {
       try { staff.assigned_categories = JSON.parse(staff.assigned_categories || '[]'); } catch (_) { staff.assigned_categories = []; }
       try { staff.assigned_items = JSON.parse(staff.assigned_items || '[]'); } catch (_) { staff.assigned_items = []; }
       try { staff.assigned_order_types = JSON.parse(staff.assigned_order_types || '[]'); } catch (_) { staff.assigned_order_types = []; }
+      try { staff.custom_view_config = staff.custom_view_config ? (typeof staff.custom_view_config === 'string' ? JSON.parse(staff.custom_view_config) : staff.custom_view_config) : null; } catch (_) { staff.custom_view_config = null; }
     }
 
     return res.json({ success: true, data: staffList });
@@ -62,6 +63,7 @@ const getStaffById = async (req, res) => {
     try { staff.assigned_categories = JSON.parse(staff.assigned_categories || '[]'); } catch (_) { staff.assigned_categories = []; }
     try { staff.assigned_items = JSON.parse(staff.assigned_items || '[]'); } catch (_) { staff.assigned_items = []; }
     try { staff.assigned_order_types = JSON.parse(staff.assigned_order_types || '[]'); } catch (_) { staff.assigned_order_types = []; }
+    try { staff.custom_view_config = staff.custom_view_config ? (typeof staff.custom_view_config === 'string' ? JSON.parse(staff.custom_view_config) : staff.custom_view_config) : null; } catch (_) { staff.custom_view_config = null; }
 
     return res.json({ success: true, data: staff });
   } catch (err) {
