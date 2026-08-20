@@ -38,16 +38,43 @@ const getAllCustomers = async (req, res) => {
 const searchCustomers = async (req, res) => {
   try {
     const { query: searchQuery } = req.query;
-    if (!searchQuery) return res.json({ success: true, data: [] });
+    if (!searchQuery || !searchQuery.trim()) return res.json({ success: true, data: [] });
+    const q = searchQuery.trim();
 
-    const [rows] = await pool.query(`
-      SELECT * FROM pos_customers 
-      WHERE (is_deleted = 0 OR is_deleted IS NULL) 
-        AND (name LIKE ? OR phone LIKE ?) 
-      ORDER BY name ASC LIMIT 10
-    `, [`%${searchQuery}%`, `%${searchQuery}%`]);
+    // 1. Search registered Customers
+    const [customers] = await pool.query(`
+      SELECT c.id, c.name, c.phone, c.address, 'customer' as type,
+             (SELECT COUNT(*) FROM pos_orders o WHERE o.customer_phone = c.phone AND (o.is_deleted = 0 OR o.is_deleted IS NULL)) as total_orders
+      FROM pos_customers c
+      WHERE (c.is_deleted = 0 OR c.is_deleted IS NULL) 
+        AND (c.name LIKE ? OR c.phone LIKE ?) 
+      ORDER BY total_orders DESC, c.name ASC LIMIT 6
+    `, [`%${q}%`, `%${q}%`]);
 
-    return res.json({ success: true, data: rows });
+    // 2. Search active Staff Members
+    const [staffList] = await pool.query(`
+      SELECT id as staff_id, name, phone, role, username, 'staff' as type
+      FROM pos_staff
+      WHERE status = 'Active'
+        AND (phone LIKE ? OR name LIKE ? OR username LIKE ?)
+      ORDER BY name ASC LIMIT 6
+    `, [`%${q}%`, `%${q}%`, `%${q}%`]);
+
+    const results = [
+      ...customers.map(c => ({ ...c, is_staff: false })),
+      ...staffList.map(s => ({
+        id: `staff-${s.staff_id}`,
+        staff_id: s.staff_id,
+        name: s.name,
+        phone: s.phone || '',
+        role: s.role,
+        username: s.username,
+        type: 'staff',
+        is_staff: true
+      }))
+    ];
+
+    return res.json({ success: true, data: results });
   } catch (err) {
     console.error('[CustomerController] searchCustomers error:', err);
     return res.status(500).json({ success: false, error: err.message });

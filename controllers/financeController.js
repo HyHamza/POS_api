@@ -184,6 +184,16 @@ const processPayroll = async (req, res) => {
         netPay = baseSalary + overtimeSalary;
       }
 
+      // Query staff advances in current period
+      const [advRows] = await pool.query(`
+        SELECT COALESCE(SUM(amount), 0) as total_advances
+        FROM pos_expenses
+        WHERE category = 'Advance' AND staff_id = ? AND DATE(created_at) BETWEEN ? AND ?
+      `, [staff.id, period_start, period_end]);
+
+      const totalAdvances = Number(advRows[0]?.total_advances || 0);
+      netPay = Math.max(0, netPay - totalAdvances);
+
       await pool.query(`
         INSERT INTO pos_payroll 
         (staff_id, period_start, period_end, base_salary, days_present, overtime_hours, overtime_salary, net_pay, status)

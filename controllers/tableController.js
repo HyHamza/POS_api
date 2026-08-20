@@ -137,6 +137,21 @@ const getTables = async (req, res) => {
 
 const createTable = async (req, res) => {
   try {
+    if (Array.isArray(req.body.tables)) {
+      const created = [];
+      for (const t of req.body.tables) {
+        const { number, capacity = 4, section_id, status = 'available' } = t;
+        const [result] = await pool.query(
+          'INSERT INTO pos_tables (number, capacity, section_id, status) VALUES (?, ?, ?, ?)',
+          [number, capacity, section_id || null, status]
+        );
+        const [rows] = await pool.query('SELECT * FROM pos_tables WHERE id = ?', [result.insertId]);
+        if (rows[0]) created.push(rows[0]);
+      }
+      broadcastTenantEvent('table:updated', created[created.length - 1]);
+      return res.status(201).json({ success: true, data: created });
+    }
+
     const { number, capacity = 4, section_id, status = 'available' } = req.body;
     const [result] = await pool.query(
       'INSERT INTO pos_tables (number, capacity, section_id, status) VALUES (?, ?, ?, ?)',

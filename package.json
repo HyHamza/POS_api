@@ -1,6 +1,6 @@
 {
   "name": "rider-api",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Rider Tracking System API Server",
   "main": "server.js",
   "scripts": {

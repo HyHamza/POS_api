@@ -268,6 +268,20 @@ const createOrder = async (req, res) => {
 
     const orderId = orderResult.insertId;
 
+    // 4.5 Auto-save / update Customer in pos_customers if phone is provided
+    if (customer_phone) {
+      try {
+        const [existing] = await conn.query('SELECT id FROM pos_customers WHERE phone = ? LIMIT 1', [customer_phone]);
+        if (existing.length > 0) {
+          await conn.query('UPDATE pos_customers SET name = COALESCE(?, name), address = COALESCE(?, address), is_deleted = 0 WHERE id = ?', [customer_name || null, customer_address || null, existing[0].id]);
+        } else {
+          await conn.query('INSERT INTO pos_customers (phone, name, address, is_deleted) VALUES (?, ?, ?, 0)', [customer_phone, customer_name || null, customer_address || null]);
+        }
+      } catch (custErr) {
+        console.warn('[OrderController] Auto-save customer warning:', custErr.message);
+      }
+    }
+
     // 5. Insert Order Items & deduct inventory
     for (const item of items) {
       let resolvedMenuItemId = item.menu_item_id || null;
@@ -419,7 +433,8 @@ const markPaymentReceived = async (req, res) => {
   try {
     const { id } = req.params;
     const staffId = req.user?.id || req.body.staffId || null;
-    const paymentMethod = req.body.paymentMethod || 'Cash';
+    const paymentMethod = req.body.payment_method || req.body.paymentMethod || 'Cash';
+    const targetStaffId = req.body.targetStaffId || null;
 
     await pool.query(`
       UPDATE pos_orders 
@@ -437,6 +452,34 @@ const markPaymentReceived = async (req, res) => {
 
     const order = rows[0];
     order.items = await getOrderItems(id);
+
+    // If payment method is Staff Advance, record it under pos_expenses (category: 'Advance')
+    if (paymentMethod === 'Staff Advance' || paymentMethod === 'Advance') {
+      try {
+        let advanceStaff = null;
+        if (targetStaffId) {
+          const [sRows] = await pool.query('SELECT id, name FROM pos_staff WHERE id = ?', [targetStaffId]);
+          if (sRows.length > 0) advanceStaff = sRows[0];
+        } else if (order.customer_phone) {
+          const [sRows] = await pool.query('SELECT id, name FROM pos_staff WHERE phone = ?', [order.customer_phone]);
+          if (sRows.length > 0) advanceStaff = sRows[0];
+        }
+        if (!advanceStaff && order.staff_id) {
+          const [sRows] = await pool.query('SELECT id, name FROM pos_staff WHERE id = ?', [order.staff_id]);
+          if (sRows.length > 0) advanceStaff = sRows[0];
+        }
+
+        const advId = advanceStaff?.id || targetStaffId || null;
+        const advName = advanceStaff?.name || order.customer_name || 'Staff Member';
+
+        await pool.query(`
+          INSERT INTO pos_expenses (category, description, amount, staff_id, created_at)
+          VALUES ('Advance', ?, ?, ?, NOW())
+        `, [`Staff Advance for Order #${order.order_number} (${advName})`, order.total || 0, advId]);
+      } catch (expErr) {
+        console.warn('[OrderController] Failed to record staff advance expense in cloud/web:', expErr.message);
+      }
+    }
 
     broadcastTenantEvent('order:paymentReceived', order);
     broadcastTenantEvent('order:updated', order);
