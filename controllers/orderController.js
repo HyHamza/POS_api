@@ -268,14 +268,17 @@ const createOrder = async (req, res) => {
 
     const orderId = orderResult.insertId;
 
-    // 4.5 Auto-save / update Customer in pos_customers if phone is provided
-    if (customer_phone) {
+    // 4.5 Auto-save / update Customer in pos_customers if phone is provided (and NOT a staff member)
+    if (customer_phone && !req.body.is_staff_order) {
       try {
-        const [existing] = await conn.query('SELECT id FROM pos_customers WHERE phone = ? LIMIT 1', [customer_phone]);
-        if (existing.length > 0) {
-          await conn.query('UPDATE pos_customers SET name = COALESCE(?, name), address = COALESCE(?, address), is_deleted = 0 WHERE id = ?', [customer_name || null, customer_address || null, existing[0].id]);
-        } else {
-          await conn.query('INSERT INTO pos_customers (phone, name, address, is_deleted) VALUES (?, ?, ?, 0)', [customer_phone, customer_name || null, customer_address || null]);
+        const [isStaff] = await conn.query('SELECT id FROM pos_staff WHERE phone = ? AND status = "Active" LIMIT 1', [customer_phone]);
+        if (isStaff.length === 0) {
+          const [existing] = await conn.query('SELECT id FROM pos_customers WHERE phone = ? LIMIT 1', [customer_phone]);
+          if (existing.length > 0) {
+            await conn.query('UPDATE pos_customers SET name = COALESCE(?, name), address = COALESCE(?, address), is_deleted = 0 WHERE id = ?', [customer_name || null, customer_address || null, existing[0].id]);
+          } else {
+            await conn.query('INSERT INTO pos_customers (phone, name, address, is_deleted) VALUES (?, ?, ?, 0)', [customer_phone, customer_name || null, customer_address || null]);
+          }
         }
       } catch (custErr) {
         console.warn('[OrderController] Auto-save customer warning:', custErr.message);

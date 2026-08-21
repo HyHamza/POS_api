@@ -41,13 +41,15 @@ const searchCustomers = async (req, res) => {
     if (!searchQuery || !searchQuery.trim()) return res.json({ success: true, data: [] });
     const q = searchQuery.trim();
 
-    // 1. Search registered Customers
+    // 1. Search registered Customers (deduplicate against active Staff)
     const [customers] = await pool.query(`
       SELECT c.id, c.name, c.phone, c.address, 'customer' as type,
              (SELECT COUNT(*) FROM pos_orders o WHERE o.customer_phone = c.phone AND (o.is_deleted = 0 OR o.is_deleted IS NULL)) as total_orders
       FROM pos_customers c
       WHERE (c.is_deleted = 0 OR c.is_deleted IS NULL) 
         AND (c.name LIKE ? OR c.phone LIKE ?) 
+        AND c.phone NOT IN (SELECT phone FROM pos_staff WHERE status = 'Active' AND phone IS NOT NULL AND phone != '')
+        AND c.name NOT IN (SELECT name FROM pos_staff WHERE status = 'Active' AND name IS NOT NULL AND name != '')
       ORDER BY total_orders DESC, c.name ASC LIMIT 6
     `, [`%${q}%`, `%${q}%`]);
 
