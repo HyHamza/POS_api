@@ -273,17 +273,50 @@ const getStaffSalesReport = async (req, res) => {
     const sd = start_date || today;
     const ed = end_date || today;
 
-    const [rows] = await pool.query(`
+    const [summary] = await pool.query(`
       SELECT s.id as staff_id, s.name as staff_name, s.role as staff_role,
-             COUNT(o.id) as orders_count,
-             COALESCE(SUM(o.total), 0) as total_sales
+             COUNT(DISTINCT CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.id END) as order_count,
+             COALESCE(SUM(CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.total ELSE 0 END), 0) as total_sales,
+             COUNT(DISTINCT CASE WHEN o.dispatched_by = s.id AND o.status = 'completed' THEN o.id END) as dispatched_count,
+             COUNT(DISTINCT CASE WHEN (COALESCE(o.settled_by, o.payment_received_by) = s.id) AND (o.payment_received = 1 OR o.status = 'completed') THEN o.id END) as settled_count,
+             COALESCE(SUM(CASE WHEN (COALESCE(o.settled_by, o.payment_received_by) = s.id) AND (o.payment_received = 1 OR o.status = 'completed') THEN o.total ELSE 0 END), 0) as settled_sales
       FROM pos_staff s
-      LEFT JOIN pos_orders o ON o.staff_id = s.id AND o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+      LEFT JOIN pos_orders o ON (o.staff_id = s.id OR o.dispatched_by = s.id OR COALESCE(o.settled_by, o.payment_received_by) = s.id)
+        AND DATE(o.created_at) BETWEEN ? AND ?
+      WHERE (s.is_deleted = 0 OR s.is_deleted IS NULL)
       GROUP BY s.id, s.name, s.role
-      ORDER BY total_sales DESC
+      HAVING (order_count > 0 OR dispatched_count > 0 OR settled_count > 0)
+      ORDER BY total_sales DESC, settled_sales DESC
     `, [sd, ed]);
 
-    return res.json({ success: true, data: rows });
+    const [ordersRaw] = await pool.query(`
+      SELECT 
+        o.id, o.order_number, o.created_at, o.updated_at, o.type, o.status,
+        o.subtotal, o.tax, o.discount, o.total, o.notes, o.rider_name,
+        o.customer_name, o.customer_phone, o.customer_address, o.payment_received,
+        COALESCE(o.payment_method, 'Cash') as payment_method,
+        t.number as table_number,
+        o.staff_id,
+        COALESCE(o.staff_name, s_taken.name, 'Admin') as staff_name,
+        COALESCE(s_taken.role, 'Staff') as staff_role,
+        o.dispatched_by,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        o.dispatched_at,
+        COALESCE(o.settled_by, o.payment_received_by) as settled_by,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role,
+        COALESCE(o.settled_at, o.payment_received_at) as settled_at
+      FROM pos_orders o
+      LEFT JOIN pos_tables t ON o.table_id = t.id
+      LEFT JOIN pos_staff s_taken ON o.staff_id = s_taken.id
+      LEFT JOIN pos_staff s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN pos_staff s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
+      WHERE o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+      ORDER BY o.created_at DESC LIMIT 1000
+    `, [sd, ed]);
+
+    return res.json({ success: true, data: { summary: summary || [], orders: ordersRaw || [] } });
   } catch (err) {
     console.error('[FinanceController] getStaffSalesReport error:', err);
     return res.status(500).json({ success: false, error: err.message });

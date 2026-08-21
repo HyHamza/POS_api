@@ -86,7 +86,7 @@ const getRiderWise = async (req, res) => {
 const getCustomSales = async (req, res) => {
   try {
     const { pool, restaurantId } = getContext(req);
-    const { start_date, end_date, order_type, status, staff_id, payment_method, min_amount, max_amount } = req.query;
+    const { start_date, end_date, order_type, status, staff_id, dispatched_by, settled_by, payment_method, min_amount, max_amount } = req.query;
     const def = getTodayRange();
     const sd = start_date || def.start;
     const ed = end_date || def.end;
@@ -94,13 +94,25 @@ const getCustomSales = async (req, res) => {
     let query = `
       SELECT 
         o.id, o.order_number, o.type, o.created_at, o.status, o.subtotal, o.tax, o.discount, o.total,
-        o.customer_name, o.customer_phone, o.customer_address, o.rider_name,
+        o.customer_name, o.customer_phone, o.customer_address, o.rider_name, o.payment_received,
         COALESCE(o.payment_method, 'Cash') as payment_method,
-        s.name as staff_name, s.role as staff_role,
-        t.number as table_number
+        t.number as table_number,
+        o.staff_id,
+        COALESCE(o.staff_name, s.name, 'Admin') as staff_name,
+        COALESCE(s.role, 'Staff') as staff_role,
+        o.dispatched_by,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        o.dispatched_at,
+        COALESCE(o.settled_by, o.payment_received_by) as settled_by,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role,
+        COALESCE(o.settled_at, o.payment_received_at) as settled_at
       FROM _pos_orders_base o
       LEFT JOIN _pos_staff_base s ON o.staff_id = s.id
       LEFT JOIN _pos_tables_base t ON o.table_id = t.id
+      LEFT JOIN _pos_staff_base s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN _pos_staff_base s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
       WHERE o.restaurant_id = ? AND DATE(o.created_at) BETWEEN ? AND ?
     `;
     const params = [restaurantId, sd, ed];
@@ -116,6 +128,14 @@ const getCustomSales = async (req, res) => {
     if (staff_id && staff_id !== 'All') {
       query += ' AND o.staff_id = ?';
       params.push(staff_id);
+    }
+    if (dispatched_by && dispatched_by !== 'All') {
+      query += ' AND o.dispatched_by = ?';
+      params.push(dispatched_by);
+    }
+    if (settled_by && settled_by !== 'All') {
+      query += ' AND (COALESCE(o.settled_by, o.payment_received_by) = ?)';
+      params.push(settled_by);
     }
     if (payment_method && payment_method !== 'All') {
       query += " AND COALESCE(o.payment_method, 'Cash') = ?";
@@ -351,16 +371,20 @@ const getEmployeeWise = async (req, res) => {
         s.id as staff_id,
         s.name as staff_name,
         s.role as staff_role,
-        COUNT(o.id) as order_count,
-        SUM(CASE WHEN o.status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
-        COALESCE(SUM(CASE WHEN o.status = 'completed' THEN o.total ELSE 0 END), 0) as total_sales,
-        COALESCE(SUM(CASE WHEN o.status = 'completed' THEN o.discount ELSE 0 END), 0) as total_discounts_given,
-        COALESCE(AVG(CASE WHEN o.status = 'completed' THEN o.total ELSE NULL END), 0) as average_ticket
+        COUNT(DISTINCT CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.id END) as order_count,
+        SUM(CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN 1 ELSE 0 END) as completed_orders,
+        COALESCE(SUM(CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.total ELSE 0 END), 0) as total_sales,
+        COALESCE(SUM(CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.discount ELSE 0 END), 0) as total_discounts_given,
+        COALESCE(AVG(CASE WHEN o.staff_id = s.id AND o.status = 'completed' THEN o.total ELSE NULL END), 0) as average_ticket,
+        COUNT(DISTINCT CASE WHEN o.dispatched_by = s.id AND o.status = 'completed' THEN o.id END) as dispatched_count,
+        COUNT(DISTINCT CASE WHEN (COALESCE(o.settled_by, o.payment_received_by) = s.id) AND (o.payment_received = 1 OR o.status = 'completed') THEN o.id END) as settled_count,
+        COALESCE(SUM(CASE WHEN (COALESCE(o.settled_by, o.payment_received_by) = s.id) AND (o.payment_received = 1 OR o.status = 'completed') THEN o.total ELSE 0 END), 0) as settled_sales
       FROM _pos_staff_base s
-      LEFT JOIN _pos_orders_base o ON o.staff_id = s.id AND o.restaurant_id = ? AND DATE(o.created_at) BETWEEN ? AND ?
+      LEFT JOIN _pos_orders_base o ON (o.staff_id = s.id OR o.dispatched_by = s.id OR COALESCE(o.settled_by, o.payment_received_by) = s.id)
+        AND o.restaurant_id = ? AND DATE(o.created_at) BETWEEN ? AND ?
       WHERE s.restaurant_id = ? AND (s.is_deleted = 0 OR s.is_deleted IS NULL)
       GROUP BY s.id, s.name, s.role
-      ORDER BY total_sales DESC
+      ORDER BY total_sales DESC, settled_sales DESC
     `, [restaurantId, sd, ed, restaurantId]);
 
     return res.json({
@@ -786,9 +810,23 @@ const getMopWiseDetail = async (req, res) => {
         COALESCE(o.payment_method, 'Cash') as payment_method,
         o.subtotal, o.tax, o.discount, o.total as amount_paid,
         o.customer_name, o.customer_phone,
-        s.name as staff_name, s.role as staff_role
+        t.number as table_number,
+        o.staff_id,
+        COALESCE(o.staff_name, s.name, 'Admin') as staff_name,
+        COALESCE(s.role, 'Staff') as staff_role,
+        o.dispatched_by,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        o.dispatched_at,
+        COALESCE(o.settled_by, o.payment_received_by) as settled_by,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role,
+        COALESCE(o.settled_at, o.payment_received_at) as settled_at
       FROM _pos_orders_base o
       LEFT JOIN _pos_staff_base s ON o.staff_id = s.id
+      LEFT JOIN _pos_tables_base t ON o.table_id = t.id
+      LEFT JOIN _pos_staff_base s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN _pos_staff_base s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
       WHERE o.restaurant_id = ? AND o.status = 'completed'
         AND DATE(o.created_at) BETWEEN ? AND ?
     `;
@@ -1015,11 +1053,23 @@ const getReceipts = async (req, res) => {
         o.subtotal, o.tax, o.discount, o.total,
         COALESCE(o.payment_method, 'Cash') as payment_method,
         o.payment_received, o.customer_name, o.customer_phone,
-        s.name as staff_name,
-        t.number as table_number
+        t.number as table_number,
+        o.staff_id,
+        COALESCE(o.staff_name, s.name, 'Admin') as staff_name,
+        COALESCE(s.role, 'Staff') as staff_role,
+        o.dispatched_by,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        o.dispatched_at,
+        COALESCE(o.settled_by, o.payment_received_by) as settled_by,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role,
+        COALESCE(o.settled_at, o.payment_received_at) as settled_at
       FROM _pos_orders_base o
       LEFT JOIN _pos_staff_base s ON o.staff_id = s.id
       LEFT JOIN _pos_tables_base t ON o.table_id = t.id
+      LEFT JOIN _pos_staff_base s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN _pos_staff_base s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
       WHERE o.restaurant_id = ? AND DATE(o.created_at) BETWEEN ? AND ?
     `;
     const params = [restaurantId, sd, ed];
@@ -1052,13 +1102,21 @@ const getReceiptDetails = async (req, res) => {
 
     const [rows] = await pool.query(`
       SELECT 
-        o.*, s.name as staff_name, s.role as staff_role,
-        t.number as table_number, sec.name as section_name, fl.name as floor_name
+        o.*, 
+        COALESCE(o.staff_name, s.name, 'Admin') as staff_name, 
+        COALESCE(s.role, 'Staff') as staff_role,
+        t.number as table_number, sec.name as section_name, fl.name as floor_name,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role
       FROM _pos_orders_base o
       LEFT JOIN _pos_staff_base s ON o.staff_id = s.id
       LEFT JOIN _pos_tables_base t ON o.table_id = t.id
       LEFT JOIN _pos_sections_base sec ON t.section_id = sec.id
       LEFT JOIN _pos_floors_base fl ON sec.floor_id = fl.id
+      LEFT JOIN _pos_staff_base s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN _pos_staff_base s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
       WHERE o.restaurant_id = ? AND o.id = ?
     `, [restaurantId, id]);
 
