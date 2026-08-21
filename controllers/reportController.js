@@ -387,11 +387,40 @@ const getEmployeeWise = async (req, res) => {
       ORDER BY total_sales DESC, settled_sales DESC
     `, [restaurantId, sd, ed, restaurantId]);
 
+    const [orders] = await pool.query(`
+      SELECT 
+        o.id, o.order_number, o.created_at, o.updated_at, o.type, o.status,
+        o.subtotal, o.tax, o.discount, o.total, o.notes, o.rider_name,
+        o.customer_name, o.customer_phone, o.customer_address, o.payment_received,
+        COALESCE(o.payment_method, 'Cash') as payment_method,
+        t.number as table_number,
+        o.staff_id,
+        COALESCE(o.staff_name, s_taken.name, 'Admin') as staff_name,
+        COALESCE(s_taken.role, 'Staff') as staff_role,
+        o.dispatched_by,
+        COALESCE(o.dispatched_by_name, s_disp.name) as dispatched_by_name,
+        COALESCE(o.dispatched_by_role, s_disp.role) as dispatched_by_role,
+        o.dispatched_at,
+        COALESCE(o.settled_by, o.payment_received_by) as settled_by,
+        COALESCE(o.settled_by_name, s_sett.name) as settled_by_name,
+        COALESCE(o.settled_by_role, s_sett.role) as settled_by_role,
+        COALESCE(o.settled_at, o.payment_received_at) as settled_at
+      FROM _pos_orders_base o
+      LEFT JOIN _pos_tables_base t ON o.table_id = t.id
+      LEFT JOIN _pos_staff_base s_taken ON o.staff_id = s_taken.id
+      LEFT JOIN _pos_staff_base s_disp ON o.dispatched_by = s_disp.id
+      LEFT JOIN _pos_staff_base s_sett ON (COALESCE(o.settled_by, o.payment_received_by) = s_sett.id)
+      WHERE o.restaurant_id = ? AND o.status = 'completed' AND DATE(o.created_at) BETWEEN ? AND ?
+      ORDER BY o.created_at DESC LIMIT 1000
+    `, [restaurantId, sd, ed]);
+
     return res.json({
       success: true,
       data: {
         period: { start: sd, end: ed },
-        employees: employees || []
+        summary: employees || [],
+        employees: employees || [],
+        orders: orders || []
       }
     });
   } catch (err) {
