@@ -1,6 +1,20 @@
 const pool = require('../config/db');
 const { sendTaskNotification } = require('../utils/notifications');
 
+const TASK_SELECT_FIELDS = `
+  t.*,
+  COALESCE(
+    (SELECT full_name FROM _riders_base WHERE restaurant_id = t.restaurant_id AND (id = t.rider_id OR username = (SELECT username FROM _pos_staff_base WHERE id = t.rider_id))),
+    (SELECT name FROM _pos_staff_base WHERE restaurant_id = t.restaurant_id AND (id = t.rider_id OR username = (SELECT username FROM _riders_base WHERE id = t.rider_id))),
+    (SELECT username FROM _pos_staff_base WHERE id = t.rider_id),
+    (SELECT username FROM _riders_base WHERE id = t.rider_id)
+  ) AS rider_name,
+  COALESCE(
+    (SELECT username FROM _pos_staff_base WHERE id = t.rider_id),
+    (SELECT username FROM _riders_base WHERE id = t.rider_id)
+  ) AS rider_username
+`;
+
 const getAllTasks = async (req, res) => {
   const { id, role } = req.user;
   const normalizedRole = (role || '').toLowerCase();
@@ -25,9 +39,8 @@ const getAllTasks = async (req, res) => {
 
     if (normalizedRole === 'admin' || normalizedRole === 'superadmin') {
       query = `
-        SELECT t.*, r.full_name as rider_name 
+        SELECT ${TASK_SELECT_FIELDS}
         FROM _tasks_base t 
-        LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id
         WHERE t.restaurant_id = ?
       `;
       params.push(restaurantId);
@@ -52,9 +65,8 @@ const getAllTasks = async (req, res) => {
     } else {
       // For riders: Return rider's own tasks AND unassigned active tasks so they can view and claim them
       query = `
-        SELECT t.*, r.full_name as rider_name 
+        SELECT ${TASK_SELECT_FIELDS}
         FROM _tasks_base t 
-        LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id
         WHERE t.restaurant_id = ? AND (t.rider_id = ? OR ((t.rider_id IS NULL OR t.rider_id = 0) AND t.status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready', 'accepted'))) 
         ORDER BY t.created_at DESC
       `;
@@ -98,9 +110,8 @@ const getTaskById = async (req, res) => {
     }
 
     const [rows] = await pool.query(
-      `SELECT t.*, r.full_name as rider_name 
+      `SELECT ${TASK_SELECT_FIELDS}
        FROM _tasks_base t 
-       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
        WHERE t.id = ? AND t.restaurant_id = ?`,
       [id, restaurantId]
     );
@@ -203,9 +214,8 @@ const createTask = async (req, res) => {
 
     // Fetch the created task
     const [taskRows] = await pool.query(
-      `SELECT t.*, r.full_name as rider_name 
+      `SELECT ${TASK_SELECT_FIELDS}
        FROM _tasks_base t 
-       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
        WHERE t.id = ? AND t.restaurant_id = ?`,
       [taskId, restaurantId]
     );
@@ -384,16 +394,50 @@ const updateTaskStatus = async (req, res) => {
         // Succeeded! Broadcast claim via Socket.IO so other riders clear it from their screens
         const io = req.app.get('io');
         const licenseKey = req.headers['x-license-key'] || req.query.license_key;
-        if (io) {
-          io.to(`riders:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: userId });
-          console.log(`[Rider API] Broadcasted socket event 'task:claimed' for Task ID: ${id} by Rider ID: ${userId} in room riders:${licenseKey}`);
+        let riderName = req.user?.name || req.user?.full_name || req.user?.username || 'Rider';
+        if (!riderName || riderName === 'Rider') {
+          const [rRows] = await pool.query(
+            'SELECT COALESCE(s.name, s.username, r.full_name, r.username) as name FROM _pos_staff_base s LEFT JOIN _riders_base r ON s.username = r.username WHERE s.id = ? OR r.id = ? LIMIT 1',
+            [userId, userId]
+          );
+          if (rRows.length > 0 && rRows[0].name) riderName = rRows[0].name;
         }
-        console.log(`[Rider API] Rider ${userId} claimed task ${id} via REST API.`);
+
+        const claimPayload = { 
+          taskId: parseInt(id), 
+          riderId: userId,
+          rider_id: userId,
+          riderName: riderName,
+          rider_name: riderName,
+          rider_username: req.user?.username || riderName,
+          order_number: task.order_number,
+          status: targetStatus,
+          task: {
+            ...task,
+            id: parseInt(id),
+            rider_id: userId,
+            rider_name: riderName,
+            rider_username: req.user?.username || riderName,
+            status: targetStatus
+          }
+        };
+
+        if (io) {
+          io.to(`riders:${licenseKey}`).emit('task:claimed', claimPayload);
+          io.to(`admin:${licenseKey}`).emit('task:claimed', claimPayload);
+          io.to(`pos_clients:${licenseKey}`).emit('task:claimed', claimPayload);
+          io.to(`pos_clients:${licenseKey}`).emit('rider:task:claimed', claimPayload);
+          io.to(`admin:${licenseKey}`).emit('task:status:update', claimPayload.task);
+          io.to(`pos_clients:${licenseKey}`).emit('task:status:update', claimPayload.task);
+          io.to(`riders:${licenseKey}`).emit('task:updated', claimPayload.task);
+          console.log(`[Rider API] Broadcasted socket event 'task:claimed' for Task ID: ${id} by Rider: ${riderName} in room riders:${licenseKey}`);
+        }
+        console.log(`[Rider API] Rider ${userId} (${riderName}) claimed task ${id} via REST API.`);
 
         // Log action
         await pool.query(
           'INSERT INTO _pos_activity_logs_base (restaurant_id, user_id, user_type, user_name, section, action_type, description, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-          [restaurantId, userId, 'Rider', req.user.username || 'Rider', 'Tasks', 'Claim', `Rider claimed task ${id}`, null]
+          [restaurantId, userId, 'Rider', riderName, 'Tasks', 'Claim', `Rider ${riderName} claimed task ${id}`, null]
         );
         alreadyUpdated = true;
       } else {
@@ -467,11 +511,20 @@ const updateTaskStatus = async (req, res) => {
       }
     }
 
-    // Fetch final task details to return
+    // Fetch final task details to return with robust rider resolution
     const [updatedRows] = await pool.query(
-      `SELECT t.*, r.full_name as rider_name 
+      `SELECT t.*, 
+              COALESCE(
+                (SELECT full_name FROM _riders_base WHERE restaurant_id = t.restaurant_id AND (id = t.rider_id OR username = (SELECT username FROM _pos_staff_base WHERE id = t.rider_id))),
+                (SELECT name FROM _pos_staff_base WHERE restaurant_id = t.restaurant_id AND (id = t.rider_id OR username = (SELECT username FROM _riders_base WHERE id = t.rider_id))),
+                (SELECT username FROM _pos_staff_base WHERE id = t.rider_id),
+                (SELECT username FROM _riders_base WHERE id = t.rider_id)
+              ) AS rider_name,
+              COALESCE(
+                (SELECT username FROM _pos_staff_base WHERE id = t.rider_id),
+                (SELECT username FROM _riders_base WHERE id = t.rider_id)
+              ) AS rider_username
        FROM _tasks_base t 
-       LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
        WHERE t.id = ? AND t.restaurant_id = ?`,
       [id, restaurantId]
     );
@@ -484,6 +537,7 @@ const updateTaskStatus = async (req, res) => {
       // Broadcast to admin and pos_clients rooms about task status change
       io.to(`admin:${licenseKey}`).emit('task:status:update', updatedTask);
       io.to(`pos_clients:${licenseKey}`).emit('task:status:update', updatedTask);
+      io.to(`pos_clients:${licenseKey}`).emit('rider:task:updated', updatedTask);
       console.log(`[Rider API] Broadcasted socket event 'task:status:update' to admin:${licenseKey} and pos_clients:${licenseKey} for Task ID: ${id}, Status: ${status}`);
 
       // Broadcast task update to all riders in this restaurant
@@ -632,30 +686,47 @@ const syncOrderStatusWithTask = async (dbPool, restaurantId, orderNumber, taskSt
     attempts++;
     try {
       // 1. Fetch the task to get the current rider_id
-      const [taskRows] = await dbPool.query('SELECT rider_id FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1', [restaurantId, orderNumber]);
+      const [taskRows] = await dbPool.query('SELECT id, rider_id, status FROM _tasks_base WHERE restaurant_id = ? AND order_number = ? LIMIT 1', [restaurantId, orderNumber]);
       let riderName = null;
       if (taskRows.length > 0 && taskRows[0].rider_id) {
-        const [riderRows] = await dbPool.query('SELECT full_name FROM _riders_base WHERE restaurant_id = ? AND id = ? LIMIT 1', [restaurantId, taskRows[0].rider_id]);
-        if (riderRows.length > 0) {
-          riderName = riderRows[0].full_name;
+        const rId = taskRows[0].rider_id;
+        const [rRows] = await dbPool.query(
+          `SELECT COALESCE(
+             (SELECT full_name FROM _riders_base WHERE restaurant_id = ? AND (id = ? OR username = (SELECT username FROM _pos_staff_base WHERE id = ?))),
+             (SELECT name FROM _pos_staff_base WHERE restaurant_id = ? AND (id = ? OR username = (SELECT username FROM _riders_base WHERE id = ?))),
+             (SELECT username FROM _pos_staff_base WHERE id = ?),
+             (SELECT username FROM _riders_base WHERE id = ?)
+           ) AS full_name`,
+          [restaurantId, rId, rId, restaurantId, rId, rId, rId, rId]
+        );
+        if (rRows.length > 0 && rRows[0].full_name) {
+          riderName = rRows[0].full_name;
         }
       }
 
       let orderStatus = null;
-      if (taskStatus === 'delivering') {
+      if (taskStatus === 'delivering' || taskStatus === 'dispatched') {
         orderStatus = 'delivering';
       } else if (taskStatus === 'delivered') {
         orderStatus = 'completed';
       } else if (taskStatus === 'cancelled') {
         orderStatus = 'cancelled';
+      } else if (taskStatus === 'accepted') {
+        orderStatus = 'delivering';
       }
 
       // 2. Prepare and execute update query
-      let updateQuery = 'UPDATE _pos_orders_base SET rider_name = ?, updated_at = NOW()';
+      let updateQuery = 'UPDATE _pos_orders_base SET rider_name = COALESCE(?, rider_name), updated_at = NOW()';
       const params = [riderName];
       if (orderStatus) {
         updateQuery += ', status = ?';
         params.push(orderStatus);
+        if (orderStatus === 'delivering') {
+          updateQuery += ', dispatched_at = COALESCE(dispatched_at, NOW()), dispatched_by_name = COALESCE(?, dispatched_by_name)';
+          params.push(riderName);
+        } else if (orderStatus === 'completed') {
+          updateQuery += ', settled_at = COALESCE(settled_at, NOW())';
+        }
       }
       updateQuery += ' WHERE restaurant_id = ? AND order_number = ?';
       params.push(restaurantId, orderNumber);
@@ -741,9 +812,8 @@ const syncTaskWithOrderStatus = async (dbPool, restaurantId, orderNumber, orderS
       );
 
       const [updatedRows] = await dbPool.query(
-        `SELECT t.*, r.full_name as rider_name 
+        `SELECT ${TASK_SELECT_FIELDS}
          FROM _tasks_base t 
-         LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id 
          WHERE t.id = ? AND t.restaurant_id = ? LIMIT 1`,
         [currentTask.id, restaurantId]
       );
