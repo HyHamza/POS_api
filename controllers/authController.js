@@ -290,7 +290,25 @@ async function isRiderDutyActive(riderId, restaurantId) {
   try {
     if (!riderId || !restaurantId) return false;
 
-    // Strict check: Open attendance record in _pos_attendance_base
+    // 1. Resolve rider username from _riders_base or _pos_staff_base
+    let riderUsername = null;
+    try {
+      const [rRows] = await pool.query(
+        'SELECT username FROM _riders_base WHERE id = ? AND restaurant_id = ? LIMIT 1',
+        [riderId, restaurantId]
+      );
+      if (rRows.length > 0 && rRows[0].username) {
+        riderUsername = rRows[0].username;
+      } else {
+        const [sRows] = await pool.query(
+          'SELECT username FROM _pos_staff_base WHERE id = ? AND restaurant_id = ? LIMIT 1',
+          [riderId, restaurantId]
+        );
+        if (sRows.length > 0 && sRows[0].username) riderUsername = sRows[0].username;
+      }
+    } catch (_) {}
+
+    // 2. Strict check: Open attendance record in _pos_attendance_base
     const [rows] = await pool.query(
       `SELECT a.id, a.clock_in FROM _pos_attendance_base a
        LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
@@ -298,9 +316,17 @@ async function isRiderDutyActive(riderId, restaurantId) {
        WHERE a.restaurant_id = ?
          AND a.clock_out IS NULL
          AND (a.is_deleted IS NULL OR a.is_deleted = 0)
-         AND (r.id = ? OR a.staff_id = ?)
+         AND (
+           r.id = ? 
+           OR a.staff_id = ? 
+           OR (s.username IS NOT NULL AND s.username = ?)
+           OR (r.username IS NOT NULL AND r.username = ?)
+           OR (? IS NOT NULL AND a.staff_id IN (
+             SELECT id FROM _pos_staff_base WHERE username = ? AND restaurant_id = ?
+           ))
+         )
        LIMIT 1`,
-      [restaurantId, riderId, riderId]
+      [restaurantId, riderId, riderId, riderUsername, riderUsername, riderUsername, riderUsername, restaurantId]
     );
 
     return rows.length > 0;
@@ -320,6 +346,10 @@ const getRiderDutyStatus = async (req, res) => {
     // Get clock in time if available
     let clockInTime = null;
     try {
+      let riderUsername = null;
+      const [rRows] = await pool.query('SELECT username FROM _riders_base WHERE id = ? AND restaurant_id = ? LIMIT 1', [riderId, restaurantId]);
+      if (rRows.length > 0 && rRows[0].username) riderUsername = rRows[0].username;
+
       const [rows] = await pool.query(
         `SELECT a.clock_in FROM _pos_attendance_base a
          LEFT JOIN _pos_staff_base s ON a.staff_id = s.id AND s.restaurant_id = a.restaurant_id
@@ -327,9 +357,14 @@ const getRiderDutyStatus = async (req, res) => {
          WHERE a.restaurant_id = ?
            AND a.clock_out IS NULL
            AND (a.is_deleted IS NULL OR a.is_deleted = 0)
-           AND (r.id = ? OR a.staff_id = ?)
+           AND (
+             r.id = ? 
+             OR a.staff_id = ? 
+             OR (s.username IS NOT NULL AND s.username = ?)
+             OR (r.username IS NOT NULL AND r.username = ?)
+           )
          ORDER BY a.id DESC LIMIT 1`,
-        [restaurantId, riderId, riderId]
+        [restaurantId, riderId, riderId, riderUsername, riderUsername]
       );
       if (rows.length > 0) clockInTime = rows[0].clock_in;
     } catch (_) {}
