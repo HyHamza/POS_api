@@ -496,7 +496,8 @@ module.exports = (io) => {
 
     // Rider Accepts Task
     socket.on('rider:task:accept', runInContext(async (payload) => {
-      if (socket.role !== 'rider' || !socket.riderId) {
+      const normalizedRole = (socket.role || '').toLowerCase();
+      if (normalizedRole !== 'rider' || !socket.riderId) {
         return socket.emit('auth:error', { error: 'Unauthenticated.' });
       }
 
@@ -504,11 +505,6 @@ module.exports = (io) => {
       const riderId = socket.riderId;
 
       try {
-        const isClocked = await isRiderClockedIn(riderId, socket.restaurantId);
-        if (!isClocked) {
-          return socket.emit('task:accept:error', { taskId, error: 'Duty clock-in required. You must clock in to accept orders.' });
-        }
-
         const [taskRows] = await pool.query('SELECT * FROM tasks WHERE id = ?', [taskId]);
         if (taskRows.length === 0) {
           return socket.emit('task:accept:error', { taskId, error: 'Task not found.' });
@@ -521,10 +517,10 @@ module.exports = (io) => {
           await pool.query('UPDATE tasks SET status = ?, accepted_at = NOW() WHERE id = ?', ['accepted', taskId]);
           await pool.query('UPDATE riders SET status = ? WHERE id = ?', ['idle', riderId]);
         }
-        // Case 2: Task is unassigned (pending, cooking, processing, or ready) and can be claimed by any available rider
-        else if (task.rider_id === null && ['pending', 'cooking', 'processing', 'ready'].includes(task.status)) {
+        // Case 2: Task is unassigned and can be claimed by any available rider
+        else if (task.rider_id === null && ['pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'].includes(task.status)) {
           let targetStatus = 'accepted';
-          if (task.status === 'cooking' || task.status === 'processing') {
+          if (['cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched'].includes(task.status)) {
             targetStatus = task.status;
           }
 

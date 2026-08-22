@@ -449,7 +449,13 @@ const mergeImportPayload = async (peerData, senderClientId, restaurantId) => {
     const FIELD_LEVEL_TABLES = {
       _pos_menu_items_base:      ['price', 'description', 'is_available', 'category_id', 'cost_price', 'image_path', 'dietary_tags', 'variants'],
       _pos_deals_base:           ['price', 'description', 'is_active', 'cost_price', 'image_path'],
-      _pos_orders_base:          ['status', 'subtotal', 'total', 'notes', 'rider_name', 'payment_received', 'payment_received_at', 'payment_received_by', 'edit_count', 'is_return'],
+      _pos_orders_base:          [
+        'status', 'subtotal', 'total', 'notes', 'rider_name', 
+        'payment_received', 'payment_received_at', 'payment_received_by', 'payment_method',
+        'dispatched_by', 'dispatched_by_name', 'dispatched_by_role', 'dispatched_at',
+        'settled_by', 'settled_by_name', 'settled_by_role', 'settled_at',
+        'edit_count', 'is_return'
+      ],
       _pos_inventory_items_base: ['quantity', 'min_threshold', 'cost_per_unit'],
     };
 

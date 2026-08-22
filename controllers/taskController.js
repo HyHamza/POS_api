@@ -3,6 +3,7 @@ const { sendTaskNotification } = require('../utils/notifications');
 
 const getAllTasks = async (req, res) => {
   const { id, role } = req.user;
+  const normalizedRole = (role || '').toLowerCase();
   const { from_date, to_date, rider_id } = req.query;
 
   try {
@@ -22,7 +23,7 @@ const getAllTasks = async (req, res) => {
     let query;
     let params = [];
 
-    if (role === 'admin') {
+    if (normalizedRole === 'admin' || normalizedRole === 'superadmin') {
       query = `
         SELECT t.*, r.full_name as rider_name 
         FROM _tasks_base t 
@@ -49,23 +50,15 @@ const getAllTasks = async (req, res) => {
       }
       query += ' ORDER BY t.created_at DESC';
     } else {
-      // For riders: verify clock-in status before returning unassigned tasks
-      const { isRiderDutyActive } = require('./authController');
-      const isClockedIn = await isRiderDutyActive(id, restaurantId);
-
-      if (isClockedIn) {
-        // Clocked-in riders see their own tasks AND unassigned tasks that are pending, cooking, processing, prepared, ready_for_dispatch, dispatched, or ready so they can claim them
-        query = `SELECT * FROM _tasks_base 
-                 WHERE restaurant_id = ? AND (rider_id = ? OR (rider_id IS NULL AND status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'))) 
-                 ORDER BY created_at DESC`;
-        params.push(restaurantId, id);
-      } else {
-        // Clocked-out riders only see tasks explicitly assigned to them (or empty if none)
-        query = `SELECT * FROM _tasks_base 
-                 WHERE restaurant_id = ? AND rider_id = ? 
-                 ORDER BY created_at DESC`;
-        params.push(restaurantId, id);
-      }
+      // For riders: Return rider's own tasks AND unassigned active tasks so they can view and claim them
+      query = `
+        SELECT t.*, r.full_name as rider_name 
+        FROM _tasks_base t 
+        LEFT JOIN _riders_base r ON t.rider_id = r.id AND r.restaurant_id = t.restaurant_id
+        WHERE t.restaurant_id = ? AND (t.rider_id = ? OR ((t.rider_id IS NULL OR t.rider_id = 0) AND t.status IN ('pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready', 'accepted'))) 
+        ORDER BY t.created_at DESC
+      `;
+      params.push(restaurantId, id);
     }
 
     const [rows] = await pool.query(query, params);
@@ -88,6 +81,7 @@ const getAllTasks = async (req, res) => {
 const getTaskById = async (req, res) => {
   const { id } = req.params;
   const { id: userId, role } = req.user;
+  const normalizedRole = (role || '').toLowerCase();
 
   try {
     // FIX (Bug #1): Get restaurant_id from AsyncLocalStorage
@@ -122,7 +116,7 @@ const getTaskById = async (req, res) => {
     const task = rows[0];
 
     // Authorize: Rider can only view their own tasks
-    if (role === 'rider' && task.rider_id !== userId) {
+    if (normalizedRole === 'rider' && task.rider_id !== userId) {
       return res.status(403).json({
         success: false,
         data: null,
@@ -289,6 +283,9 @@ const updateTaskStatus = async (req, res) => {
   const { id } = req.params;
   const { status } = req.body;
   const { id: userId, role } = req.user;
+  const normalizedRole = (role || '').toLowerCase();
+  const isRider = normalizedRole === 'rider';
+  const isAdmin = ['admin', 'superadmin', 'manager'].includes(normalizedRole);
 
   const validStatuses = ['pending', 'assigned', 'accepted', 'cooking', 'processing', 'ready', 'prepared', 'ready_for_dispatch', 'dispatched', 'delivering', 'delivered', 'cancelled'];
   if (!status || !validStatuses.includes(status)) {
@@ -313,17 +310,13 @@ const updateTaskStatus = async (req, res) => {
       });
     }
 
-    // Server-side Rider Duty Check: Riders must be clocked in to accept or update tasks
-    if (role === 'rider') {
-      const { isRiderDutyActive } = require('./authController');
-      const isClocked = await isRiderDutyActive(userId, restaurantId);
-      if (!isClocked) {
-        return res.status(403).json({
-          success: false,
-          data: null,
-          error: 'Duty clock-in required. You must clock in before accepting or handling orders.'
-        });
-      }
+    // Verify rider is authenticated
+    if (isRider && !userId) {
+      return res.status(401).json({
+        success: false,
+        data: null,
+        error: 'Rider authentication required.'
+      });
     }
 
     // Fetch current task with restaurant_id filter
@@ -342,20 +335,20 @@ const updateTaskStatus = async (req, res) => {
     const task = rows[0];
     let alreadyUpdated = false;
 
-    // Guard: Riders cannot start delivery if the order has not been dispatched yet
-    if (role === 'rider' && status === 'delivering') {
-      if (!['dispatched', 'ready', 'ready_for_dispatch'].includes(task.status)) {
+    // Guard: Riders cannot start delivery if the order has been cancelled or completed
+    if (isRider && status === 'delivering') {
+      if (['cancelled', 'delivered'].includes(task.status)) {
         return res.status(400).json({
           success: false,
           data: null,
-          error: 'Cannot start delivery until the order has been dispatched by staff.'
+          error: 'Cannot start delivery on cancelled or already delivered orders.'
         });
       }
     }
 
     // FIX (Bug #8): Move the 'cancelled' admin-only guard BEFORE the rider path so it
     // applies universally regardless of which branch executes below.
-    if (status === 'cancelled' && role !== 'admin') {
+    if (status === 'cancelled' && !isAdmin) {
       return res.status(403).json({
         success: false,
         data: null,
@@ -364,9 +357,12 @@ const updateTaskStatus = async (req, res) => {
     }
 
     // Role-based validation
-    if (role === 'rider' && task.rider_id !== userId) {
-      // Allow the rider to accept/claim the task if it is currently unassigned (null)
-      if (status === 'accepted' && task.rider_id === null && ['pending', 'cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched', 'ready'].includes(task.status)) {
+    const isTaskUnassigned = (task.rider_id === null || task.rider_id === 0 || String(task.rider_id) === 'null' || !task.rider_id);
+    const isTaskMine = (task.rider_id !== null && String(task.rider_id) === String(userId));
+
+    if (isRider && !isTaskMine) {
+      // Allow the rider to accept/claim the task if it is currently unassigned
+      if (isTaskUnassigned && (status === 'accepted' || status === 'delivering')) {
         let targetStatus = 'accepted';
         if (['cooking', 'processing', 'prepared', 'ready_for_dispatch', 'dispatched'].includes(task.status)) {
           targetStatus = task.status;
@@ -374,8 +370,8 @@ const updateTaskStatus = async (req, res) => {
 
         // Attempt atomic claiming with restaurant_id filter
         const [result] = await pool.query(
-          'UPDATE _tasks_base SET rider_id = ?, status = ?, assigned_at = NOW(), accepted_at = NOW() WHERE id = ? AND restaurant_id = ? AND rider_id IS NULL AND status = ?',
-          [userId, targetStatus, id, restaurantId, task.status]
+          'UPDATE _tasks_base SET rider_id = ?, status = ?, assigned_at = NOW(), accepted_at = NOW() WHERE id = ? AND restaurant_id = ? AND (rider_id IS NULL OR rider_id = 0)',
+          [userId, targetStatus, id, restaurantId]
         );
         if (result.affectedRows === 0) {
           return res.status(400).json({
@@ -414,7 +410,7 @@ const updateTaskStatus = async (req, res) => {
       let updateQuery = 'UPDATE _tasks_base SET status = ?';
       const params = [status];
 
-      if (req.body.rider_id !== undefined && role === 'admin') {
+      if (req.body.rider_id !== undefined && isAdmin) {
         updateQuery += ', rider_id = ?';
         params.push(req.body.rider_id || null);
         if (req.body.rider_id) {
@@ -438,7 +434,7 @@ const updateTaskStatus = async (req, res) => {
       // Log action
       await pool.query(
         'INSERT INTO _pos_activity_logs_base (restaurant_id, user_id, user_type, user_name, section, action_type, description, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
-        [restaurantId, userId, role === 'admin' ? 'Admin' : 'Rider', req.user.username || role, 'Tasks', 'Update', `${role === 'admin' ? 'Admin' : 'Rider'} updated task ${id} to ${status}`, null]
+        [restaurantId, userId, isAdmin ? 'Admin' : 'Rider', req.user.username || role, 'Tasks', 'Update', `${isAdmin ? 'Admin' : 'Rider'} updated task ${id} to ${status}`, null]
       );
     }
 
@@ -502,7 +498,7 @@ const updateTaskStatus = async (req, res) => {
         io.to(`admin:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id, task: updatedTask });
         io.to(`pos_clients:${licenseKey}`).emit('task:claimed', { taskId: parseInt(id), riderId: updatedTask.rider_id, task: updatedTask });
 
-        if (role === 'admin' && req.body.rider_id) {
+        if (isAdmin && req.body.rider_id) {
           sendTaskNotification(updatedTask.rider_id, updatedTask).catch(err => console.error('Notification error:', err));
         }
       }
