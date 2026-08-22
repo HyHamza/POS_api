@@ -1,8 +1,9 @@
-const app = require('../server');
-const { mainPool } = require('../config/db');
-const { autoMigrate } = require('../config/autoMigrate');
+/**
+ * api/index.js — Vercel Serverless Function Entrypoint for RestaurantOS POS_api
+ */
 
-// Guarantee 100% schema completeness on serverless cold starts
-autoMigrate(mainPool).catch(e => console.error('[Serverless AutoMigrate Error]', e.message));
+'use strict';
+
+const app = require('../server');
 
 module.exports = app;

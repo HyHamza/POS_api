@@ -134,6 +134,7 @@ const { autoMigrate } = require('./config/autoMigrate');
 
 // Database connection sanity test & auto schema generation on startup
 async function testDbConnection() {
+  if (process.env.VERCEL) return;
   try {
     const [rows] = await pool.query('SELECT 1');
     console.log(`[${new Date().toISOString()}] Database pool connected successfully.`);
