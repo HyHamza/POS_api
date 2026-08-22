@@ -1041,13 +1041,17 @@ async function findCustomerMatch(conn, cloudTable, row) {
   return null;
 }
 
+const { getTableColumns } = require('../config/autoMigrate');
+
 async function doInsert(conn, cloudTable, clientTable, row, hlc, deviceId, errors) {
+  const validCols = await getTableColumns(conn, cloudTable);
   const cols = [], vals = [], ph = [];
   for (const [k, v] of Object.entries(row)) {
     if (k.startsWith('_') || k === 'id' || (IGNORED_COLS.includes(k) && !(k === 'order_number' && clientTable === 'orders'))) continue;
+    if (validCols.size > 0 && !validCols.has(k.toLowerCase())) continue; // Ignore unknown columns
     cols.push(`\`${k}\``); vals.push(v); ph.push('?');
   }
-  if (row._hlc && !cols.includes('`hlc`')) {
+  if (row._hlc && !cols.includes('`hlc`') && (validCols.size === 0 || validCols.has('hlc'))) {
     cols.push('`hlc`');             vals.push(row._hlc);                    ph.push('?');
     cols.push('`origin_device_id`');vals.push(row._origin_device_id || deviceId); ph.push('?');
   }
@@ -1066,12 +1070,14 @@ async function doInsert(conn, cloudTable, clientTable, row, hlc, deviceId, error
 }
 
 async function doUpdate(conn, cloudTable, clientTable, existing, row, incomingHlc, deviceId, FIELD_LEVEL, errors) {
+  const validCols = await getTableColumns(conn, cloudTable);
   const localHlc = existing.hlc || '';
   // If neither side has an HLC yet (legacy data), always accept the incoming row
   const incomingWins = !localHlc || !incomingHlc || hlcLib.compare(incomingHlc, localHlc) >= 0;
   const updates = {};
   if (FIELD_LEVEL[cloudTable]) {
     for (const field of FIELD_LEVEL[cloudTable]) {
+      if (validCols.size > 0 && !validCols.has(field.toLowerCase())) continue;
       const hlcCol = `${field}_hlc`;
       const rowHlc = row._hlc || row.hlc || incomingHlc;
       const inFHlc = (row[hlcCol] && hlcLib.compare(row[hlcCol], rowHlc) >= 0) ? row[hlcCol] : rowHlc;
@@ -1079,23 +1085,26 @@ async function doUpdate(conn, cloudTable, clientTable, existing, row, incomingHl
       // Accept if: incoming wins globally, OR incoming field HLC is >=
       if ((!locFHlc || hlcLib.compare(inFHlc, locFHlc) >= 0) && row[field] !== undefined && !IGNORED_COLS.includes(field)) {
         updates[field] = row[field];
-        updates[hlcCol] = inFHlc || incomingHlc;
+        if (validCols.size === 0 || validCols.has(hlcCol.toLowerCase())) {
+          updates[hlcCol] = inFHlc || incomingHlc;
+        }
       }
     }
     if (incomingWins) {
-      if (row.is_deleted !== undefined) updates.is_deleted = row.is_deleted;
-      if (row.deleted_at !== undefined) updates.deleted_at = row.deleted_at;
-      updates.hlc = incomingHlc || `${Date.now()}:0:cloud`;
-      updates.origin_device_id = row._origin_device_id || deviceId;
+      if (row.is_deleted !== undefined && (validCols.size === 0 || validCols.has('is_deleted'))) updates.is_deleted = row.is_deleted;
+      if (row.deleted_at !== undefined && (validCols.size === 0 || validCols.has('deleted_at'))) updates.deleted_at = row.deleted_at;
+      if (validCols.size === 0 || validCols.has('hlc')) updates.hlc = incomingHlc || `${Date.now()}:0:cloud`;
+      if (validCols.size === 0 || validCols.has('origin_device_id')) updates.origin_device_id = row._origin_device_id || deviceId;
     }
   } else {
     if (incomingWins) {
       for (const [k, v] of Object.entries(row)) {
         if (k.startsWith('_') || k === 'id' || k === 'created_at' || (IGNORED_COLS.includes(k) && !(k === 'order_number' && clientTable === 'orders'))) continue;
+        if (validCols.size > 0 && !validCols.has(k.toLowerCase())) continue;
         updates[k] = v;
       }
-      updates.hlc = incomingHlc || `${Date.now()}:0:cloud`;
-      updates.origin_device_id = row._origin_device_id || deviceId;
+      if (validCols.size === 0 || validCols.has('hlc')) updates.hlc = incomingHlc || `${Date.now()}:0:cloud`;
+      if (validCols.size === 0 || validCols.has('origin_device_id')) updates.origin_device_id = row._origin_device_id || deviceId;
     }
   }
   if (Object.keys(updates).length === 0) return;

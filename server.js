@@ -130,15 +130,17 @@ app.use('/api/pos', posRoutes);
 app.use('/api/deals', dealRoutes);
 app.use('/api/reports', reportRoutes);
 
+const { autoMigrate } = require('./config/autoMigrate');
+
 // Database connection sanity test & auto schema generation on startup
 async function testDbConnection() {
-  if (process.env.VERCEL) {
-    console.log('[Startup] Running in Vercel serverless environment. Skipping DDL migrations on cold start.');
-    return;
-  }
   try {
     const [rows] = await pool.query('SELECT 1');
     console.log(`[${new Date().toISOString()}] Database pool connected successfully.`);
+    await autoMigrate(pool);
+  } catch (err) {
+    console.error('[Startup] autoMigrate failed:', err.message);
+  }
 
     // Always execute schema.sql to ensure idempotent creation of missing views, triggers, functions and tables
     console.log('[Startup] Verifying unified database schema (tables, views, triggers, functions)...');
