@@ -138,9 +138,6 @@ async function testDbConnection() {
     const [rows] = await pool.query('SELECT 1');
     console.log(`[${new Date().toISOString()}] Database pool connected successfully.`);
     await autoMigrate(pool);
-  } catch (err) {
-    console.error('[Startup] autoMigrate failed:', err.message);
-  }
 
     // Always execute schema.sql to ensure idempotent creation of missing views, triggers, functions and tables
     console.log('[Startup] Verifying unified database schema (tables, views, triggers, functions)...');
